@@ -1,14 +1,13 @@
-# app.py — Success Dynamics Accountability Chart (Streamlit) — v3
+# app.py — Success Dynamics Accountability Chart (Streamlit) — v4
 # ----------------------------------------------------------------
-# New in v3:
-# - Delete Profile (also deletes linked logo files)
-# - Attach / Change Logo per profile (overwrite supported)
-# - Auto-rerun on Open/Save/Save As/Attach Logo/Delete Profile to refresh header + state
-# - Data folders include .gitkeep so GitHub drag-drop keeps folder structure
+# New in v4 (on top of v3):
+# • Tracking feature (monthly): plan vs actuals, cost-of-sales, per-person fixed costs, other overheads
+# • Sidebar quick-entry for a chosen month; main panel editors and charts
+# • YTD metrics + annualised run-rate projection vs goal
 #
 from __future__ import annotations
 
-import json, os, re, shutil
+import json, os, re, shutil, calendar
 from io import StringIO
 from typing import Dict, List, Any
 
@@ -19,6 +18,7 @@ import streamlit as st
 CORE_FUNCTIONS = ["Sales & Marketing", "Operations", "Finance"]
 ROLE_COLUMNS = ["Function","Role","Person","FTE","ReportsTo","KPIs","Accountabilities","Notes"]
 REVENUE_COLUMNS = ["Stream","TargetValue","Notes"]
+MONTHS = list(calendar.month_name)[1:]  # ["January", ..., "December"]
 
 APP_ROOT = os.path.dirname(os.path.abspath(__file__))
 PROFILES_DIR = os.path.join(APP_ROOT, "data", "profiles")
@@ -55,7 +55,6 @@ def _list_profiles() -> list[str]:
     return names
 
 def _slugify(name: str) -> str:
-    # Safe filename
     slug = re.sub(r"[^A-Za-z0-9._-]+", "_", name.strip())
     return slug or "business"
 
@@ -74,12 +73,10 @@ def _logo_paths_for(name: str) -> list[str]:
 def _save_logo_for(name: str, file) -> str | None:
     if file is None:
         return None
-    # Detect extension
     fname = getattr(file, "name", "logo.png")
     _, ext = os.path.splitext(fname.lower())
     if ext not in [".png",".jpg",".jpeg",".svg"]:
         ext = ".png"
-    # Remove any existing logo variants for this profile (so we don't keep multiple)
     for existing in _logo_paths_for(name):
         try: os.remove(existing)
         except: pass
@@ -93,12 +90,10 @@ def _load_logo_for(name: str) -> str | None:
     return paths[0] if paths else None
 
 def _delete_profile_and_logo(name: str) -> None:
-    # Delete JSON
     try:
         os.remove(_profile_path(name))
     except FileNotFoundError:
         pass
-    # Delete logo(s)
     for p in _logo_paths_for(name):
         try: os.remove(p)
         except: pass
@@ -174,6 +169,16 @@ def csv_template() -> str:
     df = empty_roles_df()
     return df.to_csv(index=False)
 
+def _default_people_costs(persons: list[str]) -> pd.DataFrame:
+    return pd.DataFrame([{"Person": p, "AnnualCost": 0.0} for p in persons], columns=["Person","AnnualCost"])
+
+def _default_monthly_plan(goal: float) -> pd.DataFrame:
+    per = (goal or 0.0) / 12.0
+    return pd.DataFrame({"Month": MONTHS, "PlannedRevenue": [per]*12})
+
+def _default_monthly_actuals() -> pd.DataFrame:
+    return pd.DataFrame({"Month": MONTHS, "RevenueActual": [0.0]*12, "CostOfSales": [0.0]*12, "OtherOverheads": [0.0]*12})
+
 # ---------- App State Boot ----------
 st.set_page_config(page_title="Success Dynamics – Accountability Chart", layout="wide", initial_sidebar_state="expanded")
 
@@ -184,6 +189,15 @@ if "business_name" not in st.session_state: st.session_state.business_name = "My
 if "lock_goal" not in st.session_state: st.session_state.lock_goal = True
 if "revenue_goal" not in st.session_state: st.session_state.revenue_goal = float(st.session_state.revenue_streams_df["TargetValue"].sum())
 if "current_logo_path" not in st.session_state: st.session_state.current_logo_path = _load_logo_for(st.session_state.business_name)
+
+# Tracking state
+if "people_costs_df" not in st.session_state:
+    uniq_people = sorted(set(st.session_state.roles_df["Person"].dropna().astype(str).str.strip()) - {""})
+    st.session_state.people_costs_df = _default_people_costs(uniq_people)
+if "monthly_plan_df" not in st.session_state:
+    st.session_state.monthly_plan_df = _default_monthly_plan(st.session_state.revenue_goal)
+if "monthly_actuals_df" not in st.session_state:
+    st.session_state.monthly_actuals_df = _default_monthly_actuals()
 
 # ---------- Sidebar: Admin ----------
 with st.sidebar:
@@ -205,6 +219,13 @@ with st.sidebar:
                     st.session_state.revenue_streams_df = pd.DataFrame(data.get("revenue_streams", DEFAULT_STREAMS), columns=REVENUE_COLUMNS)
                     st.session_state.revenue_goal = float(data.get("business", {}).get("revenue_goal", st.session_state.revenue_streams_df["TargetValue"].sum()))
                     st.session_state.lock_goal = bool(data.get("business", {}).get("lock_goal", True))
+                    # tracking
+                    pc = data.get("tracking", {}).get("people_costs", [])
+                    st.session_state.people_costs_df = pd.DataFrame(pc, columns=["Person","AnnualCost"]) if pc else _default_people_costs([])
+                    mp = data.get("tracking", {}).get("monthly_plan", [])
+                    st.session_state.monthly_plan_df = pd.DataFrame(mp, columns=["Month","PlannedRevenue"]) if mp else _default_monthly_plan(st.session_state.revenue_goal)
+                    ma = data.get("tracking", {}).get("monthly_actuals", [])
+                    st.session_state.monthly_actuals_df = pd.DataFrame(ma, columns=["Month","RevenueActual","CostOfSales","OtherOverheads"]) if ma else _default_monthly_actuals()
                     st.session_state.current_logo_path = _load_logo_for(st.session_state.business_name)
                     st.success(f"Loaded profile: {selected}")
                     st.rerun()
@@ -222,6 +243,11 @@ with st.sidebar:
                 "functions": st.session_state.functions,
                 "roles": st.session_state.roles_df.fillna("").to_dict(orient="records"),
                 "revenue_streams": st.session_state.revenue_streams_df.fillna("").to_dict(orient="records"),
+                "tracking": {
+                    "people_costs": st.session_state.people_costs_df.fillna(0).to_dict(orient="records"),
+                    "monthly_plan": st.session_state.monthly_plan_df.fillna(0).to_dict(orient="records"),
+                    "monthly_actuals": st.session_state.monthly_actuals_df.fillna(0).to_dict(orient="records"),
+                }
             }
             try:
                 with open(_profile_path(st.session_state.business_name), "w", encoding="utf-8") as f:
@@ -242,6 +268,11 @@ with st.sidebar:
                 "functions": st.session_state.functions,
                 "roles": st.session_state.roles_df.fillna("").to_dict(orient="records"),
                 "revenue_streams": st.session_state.revenue_streams_df.fillna("").to_dict(orient="records"),
+                "tracking": {
+                    "people_costs": st.session_state.people_costs_df.fillna(0).to_dict(orient="records"),
+                    "monthly_plan": st.session_state.monthly_plan_df.fillna(0).to_dict(orient="records"),
+                    "monthly_actuals": st.session_state.monthly_actuals_df.fillna(0).to_dict(orient="records"),
+                }
             }
             try:
                 with open(_profile_path(name), "w", encoding="utf-8") as f:
@@ -263,7 +294,6 @@ with st.sidebar:
             try:
                 _delete_profile_and_logo(selected)
                 st.success(f"Deleted profile: {selected}")
-                # If deleting the current profile, reset to defaults
                 if _slugify(selected) == _slugify(st.session_state.business_name):
                     st.session_state.business_name = "My Business"
                     st.session_state.functions = CORE_FUNCTIONS.copy()
@@ -272,6 +302,9 @@ with st.sidebar:
                     st.session_state.revenue_goal = float(st.session_state.revenue_streams_df["TargetValue"].sum())
                     st.session_state.lock_goal = True
                     st.session_state.current_logo_path = None
+                    st.session_state.people_costs_df = _default_people_costs([])
+                    st.session_state.monthly_plan_df = _default_monthly_plan(st.session_state.revenue_goal)
+                    st.session_state.monthly_actuals_df = _default_monthly_actuals()
                 st.rerun()
             except Exception as e:
                 st.error(f"Delete failed: {e}")
@@ -303,6 +336,24 @@ with st.sidebar:
     # Toggle goal behaviour
     st.session_state.lock_goal = st.checkbox("Lock revenue goal to sum of streams", value=st.session_state.lock_goal)
 
+    # Tracking Quick Entry
+    st.markdown("---")
+    st.markdown("### Tracking – Quick Entry")
+    q_month = st.selectbox("Month", options=MONTHS, index=0)
+    q_rev   = st.number_input("Revenue (actual)", min_value=0.0, value=0.0, step=1000.0, format="%0.0f")
+    q_cogs  = st.number_input("Cost of sales (COGS)", min_value=0.0, value=0.0, step=1000.0, format="%0.0f")
+    q_oth   = st.number_input("Other overheads (this month)", min_value=0.0, value=0.0, step=1000.0, format="%0.0f")
+    if st.button("Save Month Entry"):
+        ma = st.session_state.monthly_actuals_df.set_index("Month")
+        if q_month in ma.index:
+            ma.at[q_month, "RevenueActual"] = q_rev
+            ma.at[q_month, "CostOfSales"] = q_cogs
+            ma.at[q_month, "OtherOverheads"] = q_oth
+            st.session_state.monthly_actuals_df = ma.reset_index()
+            st.success(f"Saved tracking for {q_month}")
+        else:
+            st.error("Month not found in table.")
+
 # ---------- Header (Top) with Logo ----------
 col_logo, col_title = st.columns([1,3], vertical_alignment="center")
 with col_logo:
@@ -312,7 +363,7 @@ with col_logo:
         st.write("")  # spacer
 with col_title:
     st.title("Accountability Chart Builder")
-    st.caption("Success Dynamics — Profiles, Streams, Roles, Reporting Lines")
+    st.caption("Success Dynamics — Profiles, Streams, Roles, Reporting Lines, Tracking")
 
 # ---------- Revenue Streams ----------
 st.subheader("Revenue Streams (12‑month)")
@@ -340,7 +391,6 @@ st.session_state.revenue_streams_df = rev_editor
 
 streams_total = float(rev_editor["TargetValue"].sum())
 st.metric("Total of Streams", f"${streams_total:,.0f}")
-
 if st.session_state.lock_goal:
     st.session_state.revenue_goal = streams_total
     st.caption("Revenue goal is locked to the sum of streams above.")
@@ -396,6 +446,14 @@ with col_right:
             roles = data.get("roles", [])
             revs = data.get("revenue_streams", DEFAULT_STREAMS)
             st.session_state.revenue_streams_df = pd.DataFrame(revs, columns=REVENUE_COLUMNS)
+            # tracking
+            pc = data.get("tracking", {}).get("people_costs", [])
+            st.session_state.people_costs_df = pd.DataFrame(pc, columns=["Person","AnnualCost"]) if pc else _default_people_costs([])
+            mp = data.get("tracking", {}).get("monthly_plan", [])
+            st.session_state.monthly_plan_df = pd.DataFrame(mp, columns=["Month","PlannedRevenue"]) if mp else _default_monthly_plan(st.session_state.revenue_goal)
+            ma = data.get("tracking", {}).get("monthly_actuals", [])
+            st.session_state.monthly_actuals_df = pd.DataFrame(ma, columns=["Month","RevenueActual","CostOfSales","OtherOverheads"]) if ma else _default_monthly_actuals()
+
             df_in = pd.DataFrame(roles)
             missing = [c for c in ROLE_COLUMNS if c not in df_in.columns]
             if missing:
@@ -408,7 +466,6 @@ with col_right:
 
 st.subheader("Roles & Assignments")
 df = st.session_state.roles_df
-
 for col in ROLE_COLUMNS:
     if col not in df.columns:
         df[col] = ""
@@ -436,29 +493,110 @@ st.session_state.roles_df = edited
 
 st.markdown(":blue[Tip:] ‘ReportsTo’ should reference another *Role* name (not a person). Leave blank to attach directly under the Function header.")
 
-# Quick exports
-colA, colB = st.columns(2)
-with colA:
-    export_data = {
-        "business": {
-            "name": st.session_state.business_name,
-            "revenue_goal": st.session_state.revenue_goal,
-            "lock_goal": st.session_state.lock_goal,
-        },
-        "functions": st.session_state.functions,
-        "roles": st.session_state.roles_df.fillna("").to_dict(orient="records"),
-        "revenue_streams": st.session_state.revenue_streams_df.fillna("").to_dict(orient="records"),
-    }
-    st.download_button("Export JSON (current)", data=json.dumps(export_data, indent=2), file_name="accountability_chart.json", mime="application/json")
-with colB:
-    from io import StringIO as _SIO
-    csv_buf = _SIO()
-    st.session_state.roles_df.to_csv(csv_buf, index=False)
-    st.download_button("Export Roles CSV", data=csv_buf.getvalue(), file_name="accountability_chart_roles.csv", mime="text/csv")
+st.markdown("---")
+
+# ---------- Tracking (Setup & Dashboard) ----------
+st.header("Tracking")
+
+# People Costs setup (annual, per person)
+# Initialise defaults from current roles if needed
+current_people = sorted(set(st.session_state.roles_df["Person"].dropna().astype(str).str.strip()) - {""})
+pc_df = st.session_state.people_costs_df
+# Add missing people with 0 cost
+missing_people = [p for p in current_people if p not in set(pc_df["Person"])]
+if missing_people:
+    pc_df = pd.concat([pc_df, pd.DataFrame([{"Person": p, "AnnualCost": 0.0} for p in missing_people])], ignore_index=True)
+# Drop duplicates and non-assigned empty people
+pc_df = pc_df.drop_duplicates(subset=["Person"]).reset_index(drop=True)
+st.session_state.people_costs_df = pc_df
+
+st.subheader("People Costs (Annual)")
+pc_edit = st.data_editor(
+    st.session_state.people_costs_df,
+    num_rows="dynamic",
+    use_container_width=True,
+    column_config={
+        "Person": st.column_config.TextColumn(required=True),
+        "AnnualCost": st.column_config.NumberColumn(min_value=0.0, step=1000.0, format="%0.0f"),
+    },
+    hide_index=True,
+    key="people_costs_editor",
+)
+st.session_state.people_costs_df = pc_edit
+annual_people_cost_total = float(pc_edit["AnnualCost"].sum())
+monthly_people_cost = annual_people_cost_total / 12.0
+st.metric("Monthly fixed people cost", f"${monthly_people_cost:,.0f}")
+
+# Monthly Plan (expected revenue per month)
+st.subheader("Monthly Revenue Plan")
+mp_df = st.session_state.monthly_plan_df
+# Ensure it's 12 months, update if goal changed and plan is all zeros
+if set(mp_df["Month"]) != set(MONTHS):
+    mp_df = _default_monthly_plan(st.session_state.revenue_goal)
+if mp_df["PlannedRevenue"].sum() == 0 and st.session_state.revenue_goal > 0:
+    mp_df = _default_monthly_plan(st.session_state.revenue_goal)
+mp_edit = st.data_editor(
+    mp_df,
+    num_rows=12,
+    use_container_width=True,
+    column_config={
+        "Month": st.column_config.SelectboxColumn(options=MONTHS),
+        "PlannedRevenue": st.column_config.NumberColumn(min_value=0.0, step=1000.0, format="%0.0f"),
+    },
+    hide_index=True,
+    key="monthly_plan_editor",
+)
+st.session_state.monthly_plan_df = mp_edit
+
+# Monthly Actuals
+st.subheader("Monthly Actuals")
+ma_df = st.session_state.monthly_actuals_df
+# Ensure months align
+if set(ma_df["Month"]) != set(MONTHS):
+    ma_df = _default_monthly_actuals()
+ma_edit = st.data_editor(
+    ma_df,
+    num_rows=12,
+    use_container_width=True,
+    column_config={
+        "Month": st.column_config.SelectboxColumn(options=MONTHS),
+        "RevenueActual": st.column_config.NumberColumn(min_value=0.0, step=1000.0, format="%0.0f"),
+        "CostOfSales": st.column_config.NumberColumn(min_value=0.0, step=1000.0, format="%0.0f"),
+        "OtherOverheads": st.column_config.NumberColumn(min_value=0.0, step=1000.0, format="%0.0f"),
+    },
+    hide_index=True,
+    key="monthly_actuals_editor",
+)
+st.session_state.monthly_actuals_df = ma_edit
+
+# Combine for dashboard
+df_dash = mp_edit.merge(ma_edit, on="Month", how="left")
+df_dash["PeopleFixed"] = monthly_people_cost
+df_dash["GrossMargin"] = (df_dash["RevenueActual"] - df_dash["CostOfSales"]).fillna(0.0)
+df_dash["OperatingProfit"] = (df_dash["GrossMargin"] - df_dash["PeopleFixed"] - df_dash["OtherOverheads"]).fillna(0.0)
+df_dash = df_dash[["Month","PlannedRevenue","RevenueActual","CostOfSales","PeopleFixed","OtherOverheads","GrossMargin","OperatingProfit"]]
+
+st.subheader("Dashboard")
+# YTD: months with any actual revenue or any actual cost entered count as active months
+mask_recorded = (df_dash["RevenueActual"]>0) | (df_dash["CostOfSales"]>0) | (df_dash["OtherOverheads"]>0)
+months_recorded = int(mask_recorded.sum())
+ytd_revenue = float(df_dash.loc[mask_recorded, "RevenueActual"].sum())
+ytd_profit  = float(df_dash.loc[mask_recorded, "OperatingProfit"].sum())
+projection_annual_revenue = (ytd_revenue / months_recorded * 12.0) if months_recorded > 0 else 0.0
+projection_annual_profit  = (ytd_profit  / months_recorded * 12.0) if months_recorded > 0 else 0.0
+colm1, colm2, colm3, colm4 = st.columns(4)
+colm1.metric("Months recorded", months_recorded)
+colm2.metric("YTD Revenue", f"${ytd_revenue:,.0f}")
+colm3.metric("Annualised Revenue (run-rate)", f"${projection_annual_revenue:,.0f}")
+colm4.metric("Annualised Profit (run-rate)", f"${projection_annual_profit:,.0f}")
+
+# Charts
+st.line_chart(df_dash.set_index("Month")[["PlannedRevenue","RevenueActual"]])
+st.bar_chart(df_dash.set_index("Month")[["OperatingProfit"]])
 
 st.markdown("---")
 
-# ---------- Visualisation & Validation ----------
+# ---------- Visualisation & Validation (Org Chart) ----------
 st.subheader("Structure & Visualisation")
 roles_ser = st.session_state.roles_df["Role"].fillna("").astype(str).str.strip()
 if (roles_ser != "").sum() == 0:
@@ -477,4 +615,4 @@ else:
     if bad_refs:
         st.warning("ReportsTo references missing: " + ", ".join(bad_refs) + ". Ensure each ‘ReportsTo’ matches an existing Role name.")
 
-st.caption("© 2025 • Success Dynamics Accountability Chart • Streamlit app — v3")
+st.caption("© 2025 • Success Dynamics Accountability Chart • Streamlit app — v4")

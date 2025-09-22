@@ -1,4 +1,5 @@
-# app.py — Success Dynamics Accountability Coach — v7.1 (duplicate widget IDs fixed)
+# app.py — Success Dynamics Accountability Coach — v7.2
+# Adds a bottom "PUSH SYNC" stub with selections: UPCOACH, CALENDARLY, EMAIL, OTHER.
 from __future__ import annotations
 
 import os, json, re, calendar, tempfile, datetime as dt
@@ -707,7 +708,6 @@ with st.expander("Accountability & Next Session", expanded=False):
     ns=year_block.get("next_session", {})
     ncols=st.columns([1,1,1,2,2])
     with ncols[0]: ns_month=st.selectbox("For month", options=MONTHS, key="ns_month")
-    # Unique keys per field so there are no duplicates anywhere
     ns_defaults = ns.get(ns_month, {})
     with ncols[1]: ns_date=st.text_input("Date", value=ns_defaults.get("date",""), key=f"ns_date_{ns_month}")
     with ncols[2]: ns_time=st.text_input("Time", value=ns_defaults.get("time",""), key=f"ns_time_{ns_month}")
@@ -740,8 +740,7 @@ with st.expander("Dashboard & Charts", expanded=True):
     view_df = df_dash.head(view_n).copy()
 
     months_recorded=int(((view_df["RevenueActual"]>0)|(view_df["CostOfSales"]>0)|(view_df["OtherOverheads"]>0)).sum())
-    win_revenue=float(view_df["RevenueActual"].sum())
-    win_profit =float(view_df["OperatingProfit"].sum())
+    win_revenue=float(view_df["RevenueActual"].sum()); win_profit =float(view_df["OperatingProfit"].sum())
     st.metric("Window months (recorded)", months_recorded)
     cma, cmb = st.columns(2)
     with cma: st.metric("Revenue in window", f"${win_revenue:,.0f}")
@@ -805,9 +804,25 @@ with st.expander("Structure & Visualisation (Org Chart)", expanded=False):
         dot=build_graphviz_dot(st.session_state.business_name, float(year_block.get("revenue_goal",0.0)), st.session_state.roles_df)
         st.graphviz_chart(dot, use_container_width=True)
 
+# -------- PUSH SYNC (stub) --------
+with st.expander("PUSH SYNC (stub)", expanded=False):
+    st.caption("Select destinations to push summaries to. This is a stub UI — no external calls yet.")
+    dest = st.multiselect("Destinations", options=["UPCOACH","CALENDARLY","EMAIL","OTHER"], default=[], key="ps_dest")
+    payload_note = st.text_area("Notes / Payload preview", value="(This will include latest metrics, org chart summary, and next-session info)", key="ps_note")
+    c1, c2 = st.columns([1,3])
+    with c1:
+        do_push = st.button("Simulate Push", key="ps_push")
+    with c2:
+        if do_push:
+            if not dest:
+                st.warning("Pick at least one destination.")
+            else:
+                st.success(f"Simulated push to: {', '.join(dest)}")
+                st.info("In a live integration, credentials & API endpoints would be configured in Secrets, and this would push a formatted payload.")
+
 st.session_state.profile["business"]={"name": st.session_state.business_name}
 st.session_state.profile["functions"]=st.session_state.functions
 st.session_state.profile["roles"]=st.session_state.roles_df.fillna("").to_dict(orient="records")
 st.session_state.profile["years"][yk]=year_block
 
-st.caption("© 2025 • Success Dynamics Accountability Coach • v7.1")
+st.caption("© 2025 • Success Dynamics Accountability Coach • v7.2")

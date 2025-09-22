@@ -1,10 +1,9 @@
-# Tracking Success — v7.4
+# Tracking Success — v7.5
 
 **New in this build**
-- **Coaching Notes — Uploads & Links**: attach screenshots (PNG/JPG) and URLs **per month**, each with **Include in report** toggles.
-- **Tasks module**: quick-create tasks with common templates, assign to people (from your Organisation/People Costs), due date, notes, and an **Include in report** toggle.
-- **One‑click completion**: each task has a **Completion link** (`?complete_task=TOKEN`). Share that link with the assignee; opening the app with it marks the task **Done** automatically.
-- **Reports**: Tracking PDF now includes **Coaching evidence** (only items you marked *Include in report*) and **Tasks** (included only).
+- **UpCoach webhooks:** Enter a webhook URL in **Admin → Integrations**. We POST JSON on `task.created` and `task.updated`.
+- **Email invites with “Complete” button:** Set **App Base URL**; each task shows an **Email invite (.eml)** download with a HTML button linking to the one‑click completion token.
+- **Customer Journey Mapping (beta):** In **Admin → Customer Journey Mapping**, add/delete stages (columns), edit elements (Actions, Touchpoints, Emotions, PainPoints, Solutions), save, and export to **PDF** or **JSON**. Pre‑filled examples included.
 
 **Run**
 ```bash

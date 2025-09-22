@@ -1,11 +1,4 @@
-# app.py — Success Dynamics Accountability Coach — v7
-# ----------------------------------------------------------------
-# v7 adds:
-# • People Costs: Comment + ExtraMonthly; auto-suggest extra if comment mentions a van/vehicle
-# • Account Start Date (per year): rolling 12-month period starting from chosen month
-# • Horizon Goals (1/3/6/12 months) + dashboard **View window** selector (1,3,6,12)
-# • Metrics/charts respect Start Date + selected window
-# (retains v6: StartMonth per person, Accountability, Next Session, S3 persistence, PDFs, expanders)
+# app.py — Success Dynamics Accountability Coach — v7.1 (duplicate widget IDs fixed)
 from __future__ import annotations
 
 import os, json, re, calendar, tempfile, datetime as dt
@@ -31,11 +24,10 @@ except Exception:
     boto3 = None
     ClientError = Exception
 
-# ---------- Constants ----------
 CORE_FUNCTIONS = ["Sales & Marketing", "Operations", "Finance"]
 ROLE_COLUMNS = ["Function","Role","Person","FTE","ReportsTo","KPIs","Accountabilities","Notes"]
 REVENUE_COLUMNS = ["Stream","TargetValue","Notes"]
-MONTHS = list(calendar.month_name)[1:]  # Jan..Dec
+MONTHS = list(calendar.month_name)[1:]
 CUR_YEAR = dt.datetime.now().year
 
 APP_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -50,7 +42,6 @@ for d in (PROFILES_DIR, LOGOS_DIR):
 def _slugify(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+","_", (name or "business")).strip("_") or "business"
 
-# ---------- Storage (Local/S3) ----------
 def _storage_mode() -> str:
     return os.getenv("SD_STORAGE", "local").lower()
 
@@ -78,22 +69,16 @@ def storage_list_profiles() -> list[str]:
             paginator = s3.get_paginator("list_objects_v2")
             for page in paginator.paginate(Bucket=bucket, Prefix=_profiles_prefix()):
                 for obj in page.get("Contents", []):
-                    key = obj["Key"]
-                    if key.endswith(".json"):
-                        names.add(os.path.splitext(os.path.basename(key))[0])
+                    if obj["Key"].endswith(".json"):
+                        names.add(os.path.splitext(os.path.basename(obj["Key"]))[0])
             return sorted(names)
         except ClientError:
             return []
-    names=[]
-    for fn in os.listdir(PROFILES_DIR):
-        if fn.lower().endswith(".json"):
-            names.append(os.path.splitext(fn)[0])
-    return sorted(names)
+    return sorted([os.path.splitext(fn)[0] for fn in os.listdir(PROFILES_DIR) if fn.lower().endswith(".json")])
 
 def storage_read_profile(name: str) -> Optional[dict]:
     if _storage_mode()=="s3" and _s3_bucket() and _s3_client():
-        s3=_s3_client(); bucket=_s3_bucket()
-        key=_profiles_prefix()+f"{_slugify(name)}.json"
+        s3=_s3_client(); bucket=_s3_bucket(); key=_profiles_prefix()+f"{_slugify(name)}.json"
         try:
             obj=s3.get_object(Bucket=bucket, Key=key)
             return json.loads(obj["Body"].read().decode("utf-8"))
@@ -107,8 +92,7 @@ def storage_read_profile(name: str) -> Optional[dict]:
 def storage_write_profile(name: str, data: dict) -> bool:
     payload=json.dumps(data, indent=2).encode("utf-8")
     if _storage_mode()=="s3" and _s3_bucket() and _s3_client():
-        s3=_s3_client(); bucket=_s3_bucket()
-        key=_profiles_prefix()+f"{_slugify(name)}.json"
+        s3=_s3_client(); bucket=_s3_bucket(); key=_profiles_prefix()+f"{_slugify(name)}.json"
         try:
             s3.put_object(Bucket=bucket, Key=key, Body=payload, ContentType="application/json")
             return True
@@ -144,8 +128,7 @@ def storage_delete_profile(name: str) -> bool:
 
 def storage_save_logo(name: str, file) -> Optional[str]:
     if file is None: return None
-    fname=getattr(file,"name","logo.png")
-    _,ext=os.path.splitext(fname.lower())
+    fname=getattr(file,"name","logo.png"); _,ext=os.path.splitext(fname.lower())
     if ext not in [".png",".jpg",".jpeg",".svg"]: ext=".png"
     base=_slugify(name)
     if _storage_mode()=="s3" and _s3_bucket() and _s3_client():
@@ -155,10 +138,8 @@ def storage_save_logo(name: str, file) -> Optional[str]:
             except ClientError: pass
         key=_logos_prefix()+f"{base}{ext}"
         data=file.read()
-        try:
-            s3.put_object(Bucket=bucket, Key=key, Body=data, ContentType="image/"+ext.strip("."))
-        except ClientError:
-            return None
+        try: s3.put_object(Bucket=bucket, Key=key, Body=data, ContentType="image/"+ext.strip("."))
+        except ClientError: return None
         tmp=os.path.join(tempfile.gettempdir(), f"{base}{ext}")
         with open(tmp,"wb") as f: f.write(data)
         return tmp
@@ -189,7 +170,6 @@ def storage_load_logo_path(name: str) -> Optional[str]:
         if os.path.exists(p): return p
     return None
 
-# ---------- Defaults ----------
 def default_streams():
     return [
         {"Stream":"New Clients","TargetValue":400000,"Notes":""},
@@ -216,8 +196,7 @@ def default_next_session() -> dict:
     return {}
 
 def ensure_year_block(profile: dict, year: int, revenue_goal: float) -> dict:
-    years=profile.setdefault("years",{})
-    key=str(year)
+    years=profile.setdefault("years",{}); key=str(year)
     if key not in years:
         years[key]={
             "lock_goal": True,
@@ -228,27 +207,18 @@ def ensure_year_block(profile: dict, year: int, revenue_goal: float) -> dict:
             "monthly_actuals": default_monthly_actuals().to_dict(orient="records"),
             "accountability": default_accountability(),
             "next_session": default_next_session(),
-            "account_start_date": None,   # ISO date string
+            "account_start_date": None,
             "horizon_goals": {"M1": None, "M3": None, "M6": None, "M12": None},
             "van_monthly_default": 1200.0,
         }
     return profile
 
-def month_idx(mname: str) -> int:
-    try: return MONTHS.index(mname)+1
-    except ValueError: return 1
-
 def rotate_months_from(start_month_idx: int) -> list[str]:
-    # 1..12 -> list starting at that month, length 12
-    idx = (start_month_idx-1) % 12
+    idx=(start_month_idx-1)%12
     return MONTHS[idx:]+MONTHS[:idx]
 
-# ---------- PDF helpers ----------
 def fig_to_buf(fig) -> bytes:
-    out=BytesIO()
-    fig.savefig(out, format="png", bbox_inches="tight", dpi=160)
-    plt.close(fig)
-    return out.getvalue()
+    out=BytesIO(); fig.savefig(out, format="png", bbox_inches="tight", dpi=160); plt.close(fig); return out.getvalue()
 
 def build_tracking_pdf(profile: dict, year: int, df_dash: pd.DataFrame, logo_path: Optional[str],
                        accountability: dict, next_session: dict) -> bytes:
@@ -265,27 +235,20 @@ def build_tracking_pdf(profile: dict, year: int, df_dash: pd.DataFrame, logo_pat
         try: elems.append(RLImage(logo_path, width=120, height=40)); elems.append(Spacer(1,6))
         except Exception: pass
 
-    # Simple table of metrics
-    yb=profile.get("years",{}).get(str(year),{})
-    goal=float(yb.get("revenue_goal",0.0))
-    # compute summary
     ytd_rev=float(df_dash["RevenueActual"].sum())
     ytd_profit=float(df_dash["OperatingProfit"].sum())
     months_recorded=int(((df_dash["RevenueActual"]>0)|(df_dash["CostOfSales"]>0)|(df_dash["OtherOverheads"]>0)).sum())
+    goal=float(profile.get("years",{}).get(str(year),{}).get("revenue_goal",0.0))
     runrate_rev=(ytd_rev/months_recorded*12.0) if months_recorded>0 else 0.0
     runrate_profit=(ytd_profit/months_recorded*12.0) if months_recorded>0 else 0.0
     t=Table([["Revenue Goal", f"${goal:,.0f}", "Months Recorded", f"{months_recorded}"],
              ["YTD Revenue", f"${ytd_rev:,.0f}", "Annualised Revenue (run‑rate)", f"${runrate_rev:,.0f}"],
-             ["YTD Profit",  f"${ytd_profit:,.0f}", "Annualised Profit (run‑rate)",  f"${runrate_profit:,.0f}"]],
-             hAlign="LEFT")
-    t.setStyle(TableStyle([("FONT",(0,0),(-1,-1),"Helvetica",10),
-                           ("BACKGROUND",(0,0),(-1,0), colors.whitesmoke),
-                           ("GRID",(0,0),(-1,-1), 0.25, colors.lightgrey)]))
+             ["YTD Profit",  f"${ytd_profit:,.0f}", "Annualised Profit (run‑rate)",  f"${runrate_profit:,.0f}"]], hAlign="LEFT")
+    t.setStyle(TableStyle([("FONT",(0,0),(-1,-1),"Helvetica",10),("BACKGROUND",(0,0),(-1,0), colors.whitesmoke),("GRID",(0,0),(-1,-1),0.25, colors.lightgrey)]))
     elems.append(t); elems.append(Spacer(1,8))
 
-    # Charts
     fig1, ax = plt.subplots(figsize=(7.2,3))
-    x = list(range(len(df_dash)))
+    x=list(range(len(df_dash)))
     ax.plot(x, df_dash["PlannedRevenue"], marker="")
     ax.plot(x, df_dash["RevenueActual"], marker="")
     ax.plot(x, df_dash["BreakEvenRevenue"], marker="")
@@ -297,11 +260,10 @@ def build_tracking_pdf(profile: dict, year: int, df_dash: pd.DataFrame, logo_pat
     ax1.bar(x, df_dash["OperatingProfit"].fillna(0.0))
     ax1.set_xticks(x); ax1.set_xticklabels(df_dash["Month"], rotation=45, ha="right")
     ax1.set_ylabel("Operating Profit ($)")
-    ax2 = ax1.twinx(); ax2.plot(x, [m if m is not None else float('nan') for m in df_dash["MarginPct"]], marker="o")
+    ax2=ax1.twinx(); ax2.plot(x, [m if m is not None else float('nan') for m in df_dash["MarginPct"]], marker="o")
     ax2.set_ylabel("Margin %")
     elems.append(RLImage(BytesIO(fig_to_buf(fig2)), width=500, height=200))
 
-    # Accountability + Next Session
     elems.append(PageBreak())
     elems.append(Paragraph("Accountability (by month)", styles["H2"]))
     rows=[["Month","Action","Owner","Due","Status","Notes"]]
@@ -310,9 +272,7 @@ def build_tracking_pdf(profile: dict, year: int, df_dash: pd.DataFrame, logo_pat
             rows.append([m,it.get("action",""),it.get("owner",""),it.get("due",""),it.get("status",""),it.get("notes","")])
     if len(rows)==1: rows.append(["—","—","—","—","—","—"])
     t2=Table(rows, hAlign="LEFT", colWidths=[65,200,70,55,60,130])
-    t2.setStyle(TableStyle([("FONT",(0,0),(-1,-1),"Helvetica",8),
-                            ("BACKGROUND",(0,0),(-1,0), colors.whitesmoke),
-                            ("GRID",(0,0),(-1,-1), 0.25, colors.lightgrey)]))
+    t2.setStyle(TableStyle([("FONT",(0,0),(-1,-1),"Helvetica",8),("BACKGROUND",(0,0),(-1,0), colors.whitesmoke),("GRID",(0,0),(-1,-1),0.25, colors.lightgrey)]))
     elems.append(t2); elems.append(Spacer(1,6))
 
     elems.append(Paragraph("Next Session (by month)", styles["H2"]))
@@ -321,13 +281,10 @@ def build_tracking_pdf(profile: dict, year: int, df_dash: pd.DataFrame, logo_pat
         ns=next_session.get(m, {})
         rows3.append([m, ns.get("date",""), ns.get("time",""), ns.get("location",""), ns.get("agreed_note",""), ns.get("notes","")])
     t3=Table(rows3, hAlign="LEFT", colWidths=[65,70,50,90,110,150])
-    t3.setStyle(TableStyle([("FONT",(0,0),(-1,-1),"Helvetica",8),
-                            ("BACKGROUND",(0,0),(-1,0), colors.whitesmoke),
-                            ("GRID",(0,0),(-1,-1), 0.25, colors.lightgrey)]))
+    t3.setStyle(TableStyle([("FONT",(0,0),(-1,-1),"Helvetica",8),("BACKGROUND",(0,0),(-1,0), colors.whitesmoke),("GRID",(0,0),(-1,-1),0.25, colors.lightgrey)]))
     elems.append(t3)
 
-    doc.build(elems)
-    return buf.getvalue()
+    doc.build(elems); return buf.getvalue()
 
 def build_details_pdf(profile: dict, year: int, include_flags: dict, logo_path: Optional[str]) -> bytes:
     buf=BytesIO()
@@ -357,9 +314,7 @@ def build_details_pdf(profile: dict, year: int, include_flags: dict, logo_path: 
         if not df.empty:
             data=[["Stream","TargetValue","Notes"]]+df.fillna("").values.tolist()
             t=Table(data, hAlign="LEFT", colWidths=[220,100,160])
-            t.setStyle(TableStyle([("FONT",(0,0),(-1,-1),"Helvetica",10),
-                                   ("BACKGROUND",(0,0),(-1,0), colors.whitesmoke),
-                                   ("GRID",(0,0),(-1,-1),0.25, colors.lightgrey)]))
+            t.setStyle(TableStyle([("FONT",(0,0),(-1,-1),"Helvetica",10),("BACKGROUND",(0,0),(-1,0), colors.whitesmoke),("GRID",(0,0),(-1,-1),0.25, colors.lightgrey)]))
             elems.append(t); elems.append(Spacer(1,6))
 
     if include_flags.get("roles"):
@@ -370,9 +325,7 @@ def build_details_pdf(profile: dict, year: int, include_flags: dict, logo_path: 
             roles=roles[cols].fillna("")
             data=[cols]+roles.values.tolist()
             t=Table(data, hAlign="LEFT", colWidths=[110,120,100,40,100,120])
-            t.setStyle(TableStyle([("FONT",(0,0),(-1,-1),"Helvetica",9),
-                                   ("BACKGROUND",(0,0),(-1,0), colors.whitesmoke),
-                                   ("GRID",(0,0),(-1,-1),0.25, colors.lightgrey)]))
+            t.setStyle(TableStyle([("FONT",(0,0),(-1,-1),"Helvetica",9),("BACKGROUND",(0,0),(-1,0), colors.whitesmoke),("GRID",(0,0),(-1,-1),0.25, colors.lightgrey)]))
             elems.append(t); elems.append(Spacer(1,6))
 
     if include_flags.get("people"):
@@ -381,9 +334,7 @@ def build_details_pdf(profile: dict, year: int, include_flags: dict, logo_path: 
         if not pc.empty:
             data=[["Person","AnnualCost","StartMonth","Comment","ExtraMonthly"]]+pc.fillna("").values.tolist()
             t=Table(data, hAlign="LEFT", colWidths=[150,90,70,150,90])
-            t.setStyle(TableStyle([("FONT",(0,0),(-1,-1),"Helvetica",9),
-                                   ("BACKGROUND",(0,0),(-1,0), colors.whitesmoke),
-                                   ("GRID",(0,0),(-1,-1),0.25, colors.lightgrey)]))
+            t.setStyle(TableStyle([("FONT",(0,0),(-1,-1),"Helvetica",9),("BACKGROUND",(0,0),(-1,0), colors.whitesmoke),("GRID",(0,0),(-1,-1),0.25, colors.lightgrey)]))
             elems.append(t); elems.append(Spacer(1,6))
 
     if include_flags.get("monthly"):
@@ -392,14 +343,11 @@ def build_details_pdf(profile: dict, year: int, include_flags: dict, logo_path: 
         dfm=mp.merge(ma, on="Month", how="left")[["Month","PlannedRevenue","RevenueActual","CostOfSales","OtherOverheads"]].fillna(0.0)
         data=[list(dfm.columns)]+dfm.values.tolist()
         t=Table(data, hAlign="LEFT", colWidths=[80,100,100,100,100])
-        t.setStyle(TableStyle([("FONT",(0,0),(-1,-1),"Helvetica",8),
-                               ("BACKGROUND",(0,0),(-1,0), colors.whitesmoke),
-                               ("GRID",(0,0),(-1,-1),0.25, colors.lightgrey)]))
+        t.setStyle(TableStyle([("FONT",(0,0),(-1,-1),"Helvetica",8),("BACKGROUND",(0,0),(-1,0), colors.whitesmoke),("GRID",(0,0),(-1,-1),0.25, colors.lightgrey)]))
         elems.append(t)
 
     doc.build(elems); return buf.getvalue()
 
-# ---------- Graphviz (screen) ----------
 def build_graphviz_dot(business_name: str, revenue_goal: float, df: pd.DataFrame) -> str:
     def _esc(s:str)->str: return (s or "").replace("\n","\\n").replace('"','\\"')
     roles=df["Role"].fillna("").astype(str).str.strip()
@@ -437,7 +385,6 @@ def build_graphviz_dot(business_name: str, revenue_goal: float, df: pd.DataFrame
             dot.append(f"  {src} -> {dst};")
     dot.append("}"); return "\n".join(dot)
 
-# ---------- App Boot ----------
 st.set_page_config(page_title="Success Dynamics – Accountability Coach", layout="wide", initial_sidebar_state="expanded")
 
 if "functions" not in st.session_state: st.session_state.functions=CORE_FUNCTIONS.copy()
@@ -451,16 +398,15 @@ if "profile" not in st.session_state:
                               "years": {}}
 if "selected_year" not in st.session_state: st.session_state.selected_year=CUR_YEAR
 
-# ---------- Sidebar ----------
 with st.sidebar:
     st.markdown("### Admin")
     profiles = storage_list_profiles()
-    selected  = st.selectbox("Open business profile", options=["(none)"]+profiles, index=0)
-    new_name  = st.text_input("Business name", value=st.session_state.business_name)
+    selected  = st.selectbox("Open business profile", options=["(none)"]+profiles, index=0, key="sb_open_profile")
+    new_name  = st.text_input("Business name", value=st.session_state.business_name, key="sb_business_name")
 
     c1,c2,c3 = st.columns(3)
     with c1:
-        if st.button("Open"):
+        if st.button("Open", key="btn_open"):
             if selected!="(none)":
                 data=storage_read_profile(selected)
                 if data:
@@ -475,7 +421,7 @@ with st.sidebar:
                 else:
                     st.error("Failed to open profile.")
     with c2:
-        if st.button("Save"):
+        if st.button("Save", key="btn_save"):
             st.session_state.business_name=new_name.strip() or "My Business"
             st.session_state.profile["business"]={"name": st.session_state.business_name}
             st.session_state.profile["functions"]=st.session_state.functions
@@ -483,7 +429,7 @@ with st.sidebar:
             ok=storage_write_profile(st.session_state.business_name, st.session_state.profile)
             st.success("Saved.") if ok else st.error("Save failed."); st.rerun()
     with c3:
-        if st.button("Save As"):
+        if st.button("Save As", key="btn_save_as"):
             nm=new_name.strip() or "My Business"
             st.session_state.profile["business"]={"name": nm}
             st.session_state.profile["functions"]=st.session_state.functions
@@ -494,8 +440,8 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### Danger Zone")
-    confirm=st.checkbox("I understand this will permanently delete the selected profile and its logo(s).")
-    if st.button("Delete Profile") and confirm:
+    confirm=st.checkbox("I understand this will permanently delete the selected profile and its logo(s).", key="chk_confirm_del")
+    if st.button("Delete Profile", key="btn_delete") and confirm:
         if selected=="(none)":
             st.warning("Select a profile to delete.")
         else:
@@ -515,7 +461,7 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### Branding")
     logo_file=st.file_uploader("Upload/Change logo", type=["png","jpg","jpeg","svg"], key="logo_uploader")
-    if st.button("Attach Logo to Business"):
+    if st.button("Attach Logo to Business", key="btn_attach_logo"):
         target=new_name.strip() or st.session_state.business_name
         if logo_file is None: st.warning("Choose a logo file first.")
         else:
@@ -533,21 +479,20 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### Year")
-    year = st.number_input("Selected year", min_value=2000, max_value=2100, step=1, value=int(st.session_state.selected_year))
-    if st.button("Add / Ensure Year"):
+    year = st.number_input("Selected year", min_value=2000, max_value=2100, step=1, value=int(st.session_state.selected_year), key="sb_year")
+    if st.button("Add / Ensure Year", key="btn_ensure_year"):
         st.session_state.selected_year=int(year)
         yb=st.session_state.profile.get("years",{}).get(str(year))
         goal=float(sum(s.get("TargetValue",0.0) for s in (yb or {}).get("revenue_streams", default_streams())))
         ensure_year_block(st.session_state.profile, int(year), goal)
         st.success(f"Year {year} ready."); st.rerun()
 
-    # Quick Entry
     st.markdown("---"); st.markdown("### Tracking – Quick Entry")
-    q_month = st.selectbox("Month", options=MONTHS, index=0)
-    q_rev   = st.number_input("Revenue (actual)", min_value=0.0, value=0.0, step=1000.0, format="%0.0f")
-    q_cogs  = st.number_input("Cost of sales (COGS)", min_value=0.0, value=0.0, step=1000.0, format="%0.0f")
-    q_oth   = st.number_input("Other overheads (this month)", min_value=0.0, value=0.0, step=1000.0, format="%0.0f")
-    if st.button("Save Month Entry"):
+    q_month = st.selectbox("Month", options=MONTHS, index=0, key="qe_month")
+    q_rev   = st.number_input("Revenue (actual)", min_value=0.0, value=0.0, step=1000.0, format="%0.0f", key="qe_rev")
+    q_cogs  = st.number_input("Cost of sales (COGS)", min_value=0.0, value=0.0, step=1000.0, format="%0.0f", key="qe_cogs")
+    q_oth   = st.number_input("Other overheads (this month)", min_value=0.0, value=0.0, step=1000.0, format="%0.0f", key="qe_oth")
+    if st.button("Save Month Entry", key="btn_qe_save"):
         years=st.session_state.profile.setdefault("years",{})
         yk=str(st.session_state.selected_year)
         ensure_year_block(st.session_state.profile, int(yk), 0.0)
@@ -561,7 +506,6 @@ with st.sidebar:
         else:
             st.error("Month not found in table.")
 
-# ---------- Header ----------
 col_logo, col_title = st.columns([1,3], vertical_alignment="center")
 with col_logo:
     if st.session_state.current_logo_path and os.path.exists(st.session_state.current_logo_path):
@@ -575,18 +519,17 @@ yk=str(st.session_state.selected_year)
 profile=ensure_year_block(profile, int(yk), 0.0)
 year_block=profile["years"][yk]
 
-# ---------- Functions & Roles ----------
 with st.expander("Functions & Roles", expanded=False):
     func_col, roles_col = st.columns([1,3])
     with func_col:
-        custom_func=st.text_input("Add a function")
+        custom_func=st.text_input("Add a function", key="fn_add")
         c1,c2=st.columns(2)
         with c1:
-            if st.button("➕ Add Function"):
+            if st.button("➕ Add Function", key="btn_add_fn"):
                 if custom_func.strip() and custom_func not in st.session_state.functions:
                     st.session_state.functions.append(custom_func.strip())
         with c2:
-            if st.button("Reset to Core"):
+            if st.button("Reset to Core", key="btn_reset_core"):
                 st.session_state.functions=CORE_FUNCTIONS.copy()
         st.caption("Current: "+", ".join(st.session_state.functions))
     with roles_col:
@@ -606,7 +549,6 @@ with st.expander("Functions & Roles", expanded=False):
         )
         st.session_state.roles_df=edited
 
-# ---------- Revenue Streams ----------
 with st.expander("Revenue Streams (this year)", expanded=False):
     rev_df=pd.DataFrame(year_block.get("revenue_streams", default_streams()))
     for c in REVENUE_COLUMNS:
@@ -628,13 +570,12 @@ with st.expander("Revenue Streams (this year)", expanded=False):
     year_block["revenue_streams"]=rev_editor.fillna("").to_dict(orient="records")
     cols=st.columns(2)
     with cols[0]:
-        lock_goal_ui=st.checkbox("Lock goal to streams total", value=lock_goal)
+        lock_goal_ui=st.checkbox("Lock goal to streams total", value=lock_goal, key="chk_lock_goal")
     with cols[1]:
-        revenue_goal=st.number_input("Revenue goal ($, this year)", min_value=0.0, value=float(revenue_goal), step=50000.0, format="%0.0f", disabled=lock_goal_ui)
+        revenue_goal=st.number_input("Revenue goal ($, this year)", min_value=0.0, value=float(revenue_goal), step=50000.0, format="%0.0f", disabled=lock_goal_ui, key="nb_revenue_goal")
     year_block["lock_goal"]=bool(lock_goal_ui)
     year_block["revenue_goal"]=float(streams_total if lock_goal_ui else revenue_goal)
 
-# ---------- Account Start Date & Horizons ----------
 with st.expander("Account Start Date & Horizon Goals", expanded=True):
     sd_str = year_block.get("account_start_date")
     if sd_str:
@@ -642,7 +583,7 @@ with st.expander("Account Start Date & Horizon Goals", expanded=True):
         except Exception: sd_val = dt.date(CUR_YEAR,1,1)
     else:
         sd_val = dt.date(CUR_YEAR,1,1)
-    sd_new = st.date_input("Account Start Date (rolling 12 months)", value=sd_val, format="YYYY-MM-DD")
+    sd_new = st.date_input("Account Start Date (rolling 12 months)", value=sd_val, format="YYYY-MM-DD", key="di_start_date")
     year_block["account_start_date"]=sd_new.isoformat()
 
     st.caption("Horizon goals — targets for first 1/3/6/12 months (from Account Start Date).")
@@ -652,37 +593,35 @@ with st.expander("Account Start Date & Horizon Goals", expanded=True):
                 "M6": year_block["revenue_goal"]*6/12.0,
                 "M12": year_block["revenue_goal"]}
     c1,c2,c3,c4=st.columns(4)
-    with c1: hz["M1"]=st.number_input("1‑month goal", min_value=0.0, value=float(hz.get("M1") or default_hz["M1"]), step=1000.0, format="%0.0f")
-    with c2: hz["M3"]=st.number_input("3‑month goal", min_value=0.0, value=float(hz.get("M3") or default_hz["M3"]), step=5000.0, format="%0.0f")
-    with c3: hz["M6"]=st.number_input("6‑month goal", min_value=0.0, value=float(hz.get("M6") or default_hz["M6"]), step=10000.0, format="%0.0f")
-    with c4: hz["M12"]=st.number_input("12‑month goal", min_value=0.0, value=float(hz.get("M12") or default_hz["M12"]), step=10000.0, format="%0.0f")
+    with c1: hz["M1"]=st.number_input("1‑month goal", min_value=0.0, value=float(hz.get("M1") or default_hz["M1"]), step=1000.0, format="%0.0f", key="hz_m1")
+    with c2: hz["M3"]=st.number_input("3‑month goal", min_value=0.0, value=float(hz.get("M3") or default_hz["M3"]), step=5000.0, format="%0.0f", key="hz_m3")
+    with c3: hz["M6"]=st.number_input("6‑month goal", min_value=0.0, value=float(hz.get("M6") or default_hz["M6"]), step=10000.0, format="%0.0f", key="hz_m6")
+    with c4: hz["M12"]=st.number_input("12‑month goal", min_value=0.0, value=float(hz.get("M12") or default_hz["M12"]), step=10000.0, format="%0.0f", key="hz_m12")
     year_block["horizon_goals"]=hz
 
-# ---------- People Costs (StartMonth + Comment + ExtraMonthly) ----------
 with st.expander("People Costs (annual) — Start Month, Comment, ExtraMonthly", expanded=False):
     current_people=sorted(set(st.session_state.roles_df["Person"].dropna().astype(str).str.strip()) - {""})
+    def default_people_costs(persons: list[str]) -> pd.DataFrame:
+        return pd.DataFrame([{"Person": p, "AnnualCost": 0.0, "StartMonth": 1, "Comment":"", "ExtraMonthly": 0.0} for p in persons],
+                            columns=["Person","AnnualCost","StartMonth","Comment","ExtraMonthly"])
     pc_df=pd.DataFrame(year_block.get("people_costs", [])) if year_block.get("people_costs") else default_people_costs(current_people)
-    # add missing
     for p in current_people:
         if pc_df.empty or p not in set(pc_df["Person"]):
             pc_df=pd.concat([pc_df, pd.DataFrame([{"Person": p, "AnnualCost": 0.0, "StartMonth": 1, "Comment":"", "ExtraMonthly": 0.0}])], ignore_index=True)
     pc_df=pc_df.drop_duplicates(subset=["Person"]).reset_index(drop=True)
 
-    # Default van monthly
-    vm_default = float(year_block.get("van_monthly_default", 1200.0))
-    vm_default = st.number_input("Default Van/Vehicle monthly cost (suggested when comment mentions 'van'/'vehicle')",
-                                 min_value=0.0, value=vm_default, step=50.0)
+    vm_default=float(year_block.get("van_monthly_default", 1200.0))
+    vm_default=st.number_input("Default Van/Vehicle monthly cost", min_value=0.0, value=vm_default, step=50.0, key="nb_van_default")
     year_block["van_monthly_default"]=vm_default
 
-    # Auto-suggest ExtraMonthly when comment indicates van/vehicle and ExtraMonthly==0
     def suggest_extra(row):
-        comment = (str(row.get("Comment",""))).lower()
-        extra = float(row.get("ExtraMonthly",0.0))
+        comment=(str(row.get("Comment",""))).lower()
+        extra=float(row.get("ExtraMonthly",0.0))
         if extra==0.0 and any(k in comment for k in ["van","vehicle","ute","truck"]):
             return vm_default
         return extra
     if not pc_df.empty:
-        pc_df["ExtraMonthly"] = pc_df.apply(suggest_extra, axis=1)
+        pc_df["ExtraMonthly"]=pc_df.apply(suggest_extra, axis=1)
 
     pc_edit=st.data_editor(
         pc_df, num_rows="dynamic", use_container_width=True,
@@ -691,18 +630,16 @@ with st.expander("People Costs (annual) — Start Month, Comment, ExtraMonthly",
             "AnnualCost": st.column_config.NumberColumn(min_value=0.0, step=1000.0, format="%0.0f"),
             "StartMonth": st.column_config.SelectboxColumn(options=list(range(1,13))),
             "Comment": st.column_config.TextColumn(help="e.g., 'tradie with a van', 'apprentice'"),
-            "ExtraMonthly": st.column_config.NumberColumn(min_value=0.0, step=50.0, format="%0.0f", help="e.g., van lease, phone, etc."),
+            "ExtraMonthly": st.column_config.NumberColumn(min_value=0.0, step=50.0, format="%0.0f"),
         },
         hide_index=True, key="people_costs_editor_year",
     )
     year_block["people_costs"]=pc_edit.fillna(0.0).to_dict(orient="records")
 
-# Compute monthly people fixed cost using StartMonth + ExtraMonthly
-pc_edit=pd.DataFrame(year_block["people_costs"]) if year_block.get("people_costs") else default_people_costs([])
-per_person = []
-if not pc_edit.empty:
-    for _,row in pc_edit.iterrows():
-        per_person.append((float(row.get("AnnualCost",0.0))/12.0, int(row.get("StartMonth",1)), float(row.get("ExtraMonthly",0.0))))
+pc_edit=pd.DataFrame(year_block["people_costs"]) if year_block.get("people_costs") else pd.DataFrame(columns=["Person","AnnualCost","StartMonth","Comment","ExtraMonthly"])
+per_person=[]
+for _,row in pc_edit.iterrows():
+    per_person.append((float(row.get("AnnualCost",0.0))/12.0, int(row.get("StartMonth",1)), float(row.get("ExtraMonthly",0.0))))
 people_fixed_by_month=[]
 for idx, m in enumerate(MONTHS, start=1):
     total=0.0
@@ -711,8 +648,13 @@ for idx, m in enumerate(MONTHS, start=1):
             total += monthly + extra
     people_fixed_by_month.append(total)
 
-# ---------- Monthly Plan & Actuals ----------
 with st.expander("Monthly Plan & Actuals", expanded=False):
+    def default_monthly_plan(goal: float) -> pd.DataFrame:
+        per=(goal or 0.0)/12.0
+        return pd.DataFrame({"Month": MONTHS, "PlannedRevenue": [per]*12})
+    def default_monthly_actuals() -> pd.DataFrame:
+        return pd.DataFrame({"Month": MONTHS, "RevenueActual":[0.0]*12, "CostOfSales":[0.0]*12, "OtherOverheads":[0.0]*12})
+
     mp_df=pd.DataFrame(year_block.get("monthly_plan", default_monthly_plan(year_block.get("revenue_goal",0.0)).to_dict(orient="records")))
     if set(mp_df["Month"])!=set(MONTHS): mp_df=default_monthly_plan(year_block.get("revenue_goal",0.0))
     ma_df=pd.DataFrame(year_block.get("monthly_actuals", default_monthly_actuals().to_dict(orient="records")))
@@ -738,18 +680,17 @@ with st.expander("Monthly Plan & Actuals", expanded=False):
     year_block["monthly_plan"]=mp_edit.fillna(0.0).to_dict(orient="records")
     year_block["monthly_actuals"]=ma_edit.fillna(0.0).to_dict(orient="records")
 
-# ---------- Accountability & Next Session ----------
 with st.expander("Accountability & Next Session", expanded=False):
-    acct=year_block.get("accountability", default_accountability())
+    acct=year_block.get("accountability", {m: [] for m in MONTHS})
     st.caption("Action items to complete before next coaching session.")
     qa_cols=st.columns([1,2,1,1,1,2])
     with qa_cols[0]: a_month=st.selectbox("Month", options=MONTHS, key="acct_month")
-    with qa_cols[1]: a_action=st.text_input("Action item")
-    with qa_cols[2]: a_owner=st.text_input("Owner")
-    with qa_cols[3]: a_due=st.text_input("Due (YYYY-MM-DD)")
-    with qa_cols[4]: a_status=st.selectbox("Status", options=["Planned","Done","CarryOver"])
-    with qa_cols[5]: a_notes=st.text_input("Notes")
-    if st.button("➕ Add accountability item"):
+    with qa_cols[1]: a_action=st.text_input("Action item", key="acct_action")
+    with qa_cols[2]: a_owner=st.text_input("Owner", key="acct_owner")
+    with qa_cols[3]: a_due=st.text_input("Due (YYYY-MM-DD)", key="acct_due")
+    with qa_cols[4]: a_status=st.selectbox("Status", options=["Planned","Done","CarryOver"], key="acct_status")
+    with qa_cols[5]: a_notes=st.text_input("Notes", key="acct_notes")
+    if st.button("➕ Add accountability item", key="btn_add_acct"):
         acct.setdefault(a_month, []).append({"action":a_action,"owner":a_owner,"due":a_due,"status":a_status,"notes":a_notes})
         year_block["accountability"]=acct; st.success("Added item."); st.experimental_rerun()
 
@@ -766,46 +707,38 @@ with st.expander("Accountability & Next Session", expanded=False):
     ns=year_block.get("next_session", {})
     ncols=st.columns([1,1,1,2,2])
     with ncols[0]: ns_month=st.selectbox("For month", options=MONTHS, key="ns_month")
-    with ncols[1]: ns_date=st.text_input("Date", value=ns.get(ns_month,{}).get("date",""))
-    with ncols[2]: ns_time=st.text_input("Time", value=ns.get(ns_month,{}).get("time",""))
-    with ncols[3]: ns_location=st.text_input("Location", value=ns.get(ns_month,{}).get("location",""))
-    with ncols[4]: ns_agreed=st.text_input("Agreed note", value=ns.get(ns_month,{}).get("agreed_note",""))
-    ns_notes=st.text_input("Notes", value=ns.get(ns_month,{}).get("notes",""))
-    if st.button("💾 Save next session for month"):
+    # Unique keys per field so there are no duplicates anywhere
+    ns_defaults = ns.get(ns_month, {})
+    with ncols[1]: ns_date=st.text_input("Date", value=ns_defaults.get("date",""), key=f"ns_date_{ns_month}")
+    with ncols[2]: ns_time=st.text_input("Time", value=ns_defaults.get("time",""), key=f"ns_time_{ns_month}")
+    with ncols[3]: ns_location=st.text_input("Location", value=ns_defaults.get("location",""), key=f"ns_loc_{ns_month}")
+    with ncols[4]: ns_agreed=st.text_input("Agreed note", value=ns_defaults.get("agreed_note",""), key=f"ns_agreed_{ns_month}")
+    ns_notes=st.text_input("Notes", value=ns_defaults.get("notes",""), key=f"ns_notes_{ns_month}")
+    if st.button("💾 Save next session for month", key="btn_save_ns"):
         ns[ns_month]={"date":ns_date,"time":ns_time,"location":ns_location,"agreed_note":ns_agreed,"notes":ns_notes}
         year_block["next_session"]=ns; st.success("Saved next session.")
 
-# ---------- Dashboard & Charts ----------
 with st.expander("Dashboard & Charts", expanded=True):
-    # Build ordered months based on Account Start Date
     sd = year_block.get("account_start_date")
     if sd:
-        try:
-            sd_date = dt.date.fromisoformat(sd)
-            start_month_idx = sd_date.month
-        except Exception:
-            start_month_idx = 1
+        try: start_month_idx = dt.date.fromisoformat(sd).month
+        except Exception: start_month_idx = 1
     else:
         start_month_idx = 1
     ordered_months = rotate_months_from(start_month_idx)
 
-    # Merge tables
     mp = pd.DataFrame(year_block["monthly_plan"]); ma = pd.DataFrame(year_block["monthly_actuals"])
     df_dash = mp.merge(ma, on="Month", how="left")
     df_dash["PeopleFixed"] = [people_fixed_by_month[MONTHS.index(m)] for m in df_dash["Month"]]
     df_dash["GrossMargin"] = (df_dash["RevenueActual"] - df_dash["CostOfSales"]).fillna(0.0)
     df_dash["OperatingProfit"] = (df_dash["GrossMargin"] - df_dash["PeopleFixed"] - df_dash["OtherOverheads"]).fillna(0.0)
     df_dash["MarginPct"] = df_dash.apply(lambda r: ((r["RevenueActual"]-r["CostOfSales"])/r["RevenueActual"]*100.0) if r["RevenueActual"]>0 else None, axis=1)
-
-    # Reorder by rolling start
     df_dash["MIdx"] = df_dash["Month"].apply(lambda m: ordered_months.index(m))
     df_dash = df_dash.sort_values("MIdx").reset_index(drop=True)
 
-    # View window
-    view_n = st.selectbox("View window (months from Start Date)", options=[1,3,6,12], index=3)
+    view_n = st.selectbox("View window (months from Start Date)", options=[1,3,6,12], index=3, key="sel_view_window")
     view_df = df_dash.head(view_n).copy()
 
-    # Metrics over selected window
     months_recorded=int(((view_df["RevenueActual"]>0)|(view_df["CostOfSales"]>0)|(view_df["OtherOverheads"]>0)).sum())
     win_revenue=float(view_df["RevenueActual"].sum())
     win_profit =float(view_df["OperatingProfit"].sum())
@@ -814,26 +747,20 @@ with st.expander("Dashboard & Charts", expanded=True):
     with cma: st.metric("Revenue in window", f"${win_revenue:,.0f}")
     with cmb: st.metric("Operating Profit in window", f"${win_profit:,.0f}")
 
-    # Break-even per row (use monthly margin if available, else average of observed)
     valid_margins=[m for m in view_df["MarginPct"].tolist() if m is not None and m>0]
     fallback_margin=sum(valid_margins)/len(valid_margins) if valid_margins else 40.0
-    def compute_break_even_row(row, people_fixed_monthly: float, fallback_margin_pct: float=40.0):
+    def compute_break_even_row(row, people_fixed_monthly: float, fb: float=40.0):
         rev=float(row.get("RevenueActual",0.0)); cogs=float(row.get("CostOfSales",0.0)); other=float(row.get("OtherOverheads",0.0))
         margin_pct=((rev-cogs)/rev*100.0) if rev>0 else None
-        if margin_pct is None or margin_pct<=0.0: margin_pct=fallback_margin_pct
+        if margin_pct is None or margin_pct<=0.0: margin_pct=fb
         mr=margin_pct/100.0
         return (people_fixed_monthly+other)/mr if mr>0 else None
     view_df["BreakEvenRevenue"]=view_df.apply(lambda r: compute_break_even_row(r, r["PeopleFixed"], fallback_margin), axis=1)
 
-    # Horizon goals compare
     hz=year_block.get("horizon_goals") or {}
-    hz_target = hz.get({1:"M1",3:"M3",6:"M6",12:"M12"}[view_n])
-    if hz_target is None:
-        # default proportional
-        hz_target = year_block["revenue_goal"] * (view_n/12.0)
+    hz_target = hz.get({1:"M1",3:"M3",6:"M6",12:"M12"}[view_n]) or year_block["revenue_goal"] * (view_n/12.0)
     st.metric(f"Goal for {view_n}‑month window", f"${hz_target:,.0f}")
 
-    # Charts (respect window)
     st.write("**Revenue: Plan vs Actual vs Break‑even (window)**")
     st.line_chart(view_df.set_index("Month")[["PlannedRevenue","RevenueActual","BreakEvenRevenue"]])
     st.write("**Operating Profit with Margin % overlay (window)**")
@@ -846,14 +773,12 @@ with st.expander("Dashboard & Charts", expanded=True):
     ax2.set_ylabel("Margin %")
     st.pyplot(fig, clear_figure=True)
 
-# ---------- Reports (PDF) ----------
 with st.expander("Reports (PDF)", expanded=False):
-    incl_revenue_streams = st.checkbox("Include Revenue Streams in Details PDF", value=True)
-    incl_roles          = st.checkbox("Include Roles table in Details PDF", value=True)
-    incl_people_costs   = st.checkbox("Include People Costs in Details PDF", value=True)
-    incl_plan_actuals   = st.checkbox("Include Monthly Plan & Actuals in Details PDF", value=True)
+    incl_revenue_streams = st.checkbox("Include Revenue Streams in Details PDF", value=True, key="chk_pdf_streams")
+    incl_roles          = st.checkbox("Include Roles table in Details PDF", value=True, key="chk_pdf_roles")
+    incl_people_costs   = st.checkbox("Include People Costs in Details PDF", value=True, key="chk_pdf_people")
+    incl_plan_actuals   = st.checkbox("Include Monthly Plan & Actuals in Details PDF", value=True, key="chk_pdf_mon")
 
-    # Prepare full-year dash for PDF
     mp_full=pd.DataFrame(year_block["monthly_plan"]); ma_full=pd.DataFrame(year_block["monthly_actuals"])
     df_full = mp_full.merge(ma_full, on="Month", how="left")
     df_full["PeopleFixed"] = [people_fixed_by_month[MONTHS.index(m)] for m in df_full["Month"]]
@@ -864,16 +789,15 @@ with st.expander("Reports (PDF)", expanded=False):
 
     col_dl1, col_dl2 = st.columns(2)
     with col_dl1:
-        if st.button("Generate Tracking Report (PDF)"):
+        if st.button("Generate Tracking Report (PDF)", key="btn_pdf_tracking"):
             pdf_bytes = build_tracking_pdf(st.session_state.profile, st.session_state.selected_year, df_full, st.session_state.current_logo_path, year_block.get("accountability", default_accountability()), year_block.get("next_session", {}))
-            st.download_button("Download Tracking Report PDF", data=pdf_bytes, file_name=f"tracking_{st.session_state.business_name}_{st.session_state.selected_year}.pdf", mime="application/pdf")
+            st.download_button("Download Tracking Report PDF", data=pdf_bytes, file_name=f"tracking_{st.session_state.business_name}_{st.session_state.selected_year}.pdf", mime="application/pdf", key="dl_pdf_tracking")
     with col_dl2:
-        if st.button("Generate Business Details (PDF)"):
+        if st.button("Generate Business Details (PDF)", key="btn_pdf_details"):
             include_flags={"streams":incl_revenue_streams,"roles":incl_roles,"people":incl_people_costs,"monthly":incl_plan_actuals}
             pdf_bytes = build_details_pdf(st.session_state.profile, st.session_state.selected_year, include_flags, st.session_state.current_logo_path)
-            st.download_button("Download Business Details PDF", data=pdf_bytes, file_name=f"details_{st.session_state.business_name}_{st.session_state.selected_year}.pdf", mime="application/pdf")
+            st.download_button("Download Business Details PDF", data=pdf_bytes, file_name=f"details_{st.session_state.business_name}_{st.session_state.selected_year}.pdf", mime="application/pdf", key="dl_pdf_details")
 
-# ---------- Org Chart ----------
 with st.expander("Structure & Visualisation (Org Chart)", expanded=False):
     roles_ser=st.session_state.roles_df["Role"].fillna("").astype(str).str.strip()
     if (roles_ser!="").sum()==0: st.info("Add at least one Role to render the chart.")
@@ -881,10 +805,9 @@ with st.expander("Structure & Visualisation (Org Chart)", expanded=False):
         dot=build_graphviz_dot(st.session_state.business_name, float(year_block.get("revenue_goal",0.0)), st.session_state.roles_df)
         st.graphviz_chart(dot, use_container_width=True)
 
-# Persist
 st.session_state.profile["business"]={"name": st.session_state.business_name}
 st.session_state.profile["functions"]=st.session_state.functions
 st.session_state.profile["roles"]=st.session_state.roles_df.fillna("").to_dict(orient="records")
 st.session_state.profile["years"][yk]=year_block
 
-st.caption("© 2025 • Success Dynamics Accountability Coach • v7")
+st.caption("© 2025 • Success Dynamics Accountability Coach • v7.1")

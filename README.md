@@ -1,13 +1,11 @@
-# Success Dynamics Accountability Chart (Streamlit)
+# Success Dynamics Accountability Chart (Streamlit) — v2
 
-A ready-to-deploy Streamlit app that builds an Accountability Chart aligned to the Success Dynamics process.
+Adds top-of-page branding and profile persistence by business name.
 
-## Features
-- **Revenue Streams** editor (New Clients, Subscriptions, Upsell, etc.) with total roll-up and optional lock to the 12‑month goal.
-- **Functions & Roles:** Sales & Marketing, Operations, Finance (+ add more). Inline table for Role, Person, FTE, ReportsTo, KPIs, Accountabilities.
-- **Visual Tree:** Graphviz diagram with functions as clusters and roles as nodes; `ReportsTo` draws reporting lines.
-- **Import/Export:** Full JSON (business, functions, roles, revenue_streams) and CSV template for roles.
-- **Branding:** Sidebar logo uploader (PNG/JPG/SVG).
+## New in v2
+- Top header shows the uploaded **Success Dynamics** logo (also saved per profile).
+- **Business Profiles**: save/load by name to `./data/profiles/*.json`. Logos go to `./data/logos/`.
+- Goal can be **locked** to the sum of revenue streams or set manually.
 
 ## Quickstart
 ```bash
@@ -15,7 +13,7 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Deploy on Streamlit Cloud
-1. Push this folder to a GitHub repo.
-2. Create a new Streamlit app and select `app.py` as the entry point.
-3. Set Python version >=3.10.
+## Deploy
+- Push to GitHub and deploy on Streamlit Cloud (or run locally).
+- Note on Streamlit Cloud: local file writes in `./data` persist only for the container lifetime.
+  For long‑term persistence across restarts, connect external storage (S3, GDrive, DB).

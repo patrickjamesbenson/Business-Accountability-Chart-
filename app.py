@@ -1,50 +1,44 @@
-# app.py — Success Dynamics Accountability Chart (Streamlit)
-# -----------------------------------------------------------
-# Adds Revenue Streams breakdown that rolls up to a 12‑month goal.
-# Single-file Streamlit app:
-# - Capture revenue streams (name + target value + notes), with option to sync sum to goal
-# - Define core functions (Sales & Marketing, Operations, Finance) + custom ones
-# - Add roles per function, assign people, specify ReportsTo
-# - Record KPIs and Accountabilities per role
-# - Visualise structure as a tree (Graphviz)
-# - Import/Export JSON and CSV
+# app.py — Success Dynamics Accountability Chart (Streamlit) — v2
+# ----------------------------------------------------------------
+# New in v2:
+# - Branding logo shows at the top header (not just in the sidebar)
+# - Business Profiles: save/load by business name (on-disk JSON under ./data/profiles)
+#   • Choose existing profile from a selector, or create a new profile
+#   • Save overwrites the JSON, Save As creates a new profile
+#   • Per-business logo persistence: saved under ./data/logos/<business_name>.<ext>
 #
-# Usage:
+# Quickstart:
 #   pip install -r requirements.txt
 #   streamlit run app.py
 #
-# CSV import expects columns: Function,Role,Person,FTE,ReportsTo,KPIs,Accountabilities,Notes
-# JSON import/export uses the app's internal format (business, functions, roles, revenue_streams).
+# Notes:
+# - Streamlit Cloud/file-system persistence: files in ./data persist only for the runtime container.
+#   For long-term persistence across cloud restarts, wire this to external storage (S3, GDrive, DB).
 #
 from __future__ import annotations
 
-import json
+import json, os, re, shutil
 from io import StringIO
 from typing import Dict, List, Any
 
 import pandas as pd
 import streamlit as st
 
-# ---------- Helpers ----------
+# ---------- Constants & Helpers ----------
 CORE_FUNCTIONS = ["Sales & Marketing", "Operations", "Finance"]
-ROLE_COLUMNS = [
-    "Function",        # e.g., Sales & Marketing / Operations / Finance / Custom
-    "Role",            # e.g., Sales Manager
-    "Person",          # e.g., Alex Smith (one person per role)
-    "FTE",             # 0.0–1.0
-    "ReportsTo",       # Role name this role reports to (optional)
-    "KPIs",            # Comma-separated KPI names
-    "Accountabilities",# Free text, bullet list lines
-    "Notes"            # Free text
-]
+ROLE_COLUMNS = ["Function","Role","Person","FTE","ReportsTo","KPIs","Accountabilities","Notes"]
+REVENUE_COLUMNS = ["Stream","TargetValue","Notes"]
 
-REVENUE_COLUMNS = ["Stream", "TargetValue", "Notes"]
+APP_ROOT = os.path.dirname(os.path.abspath(__file__))
+PROFILES_DIR = os.path.join(APP_ROOT, "data", "profiles")
+LOGOS_DIR    = os.path.join(APP_ROOT, "data", "logos")
+os.makedirs(PROFILES_DIR, exist_ok=True)
+os.makedirs(LOGOS_DIR, exist_ok=True)
 
 DEFAULT_ROWS = [
     {"Function": f, "Role": "", "Person": "", "FTE": 1.0, "ReportsTo": "", "KPIs": "", "Accountabilities": "", "Notes": ""}
     for f in CORE_FUNCTIONS
 ]
-
 DEFAULT_STREAMS = [
     {"Stream": "New Clients", "TargetValue": 400000, "Notes": ""},
     {"Stream": "Subscriptions / Recurring", "TargetValue": 300000, "Notes": ""},
@@ -52,48 +46,51 @@ DEFAULT_STREAMS = [
     {"Stream": "Other / Experiments", "TargetValue": 50000, "Notes": ""},
 ]
 
-@st.cache_data(show_spinner=False)
-def empty_df() -> pd.DataFrame:
-    return pd.DataFrame(DEFAULT_ROWS, columns=ROLE_COLUMNS)
-
-@st.cache_data(show_spinner=False)
-def empty_streams_df() -> pd.DataFrame:
-    return pd.DataFrame(DEFAULT_STREAMS, columns=REVENUE_COLUMNS)
-
-@st.cache_data(show_spinner=False)
-def csv_template() -> str:
-    df = empty_df()
-    return df.to_csv(index=False)
-
-@st.cache_data(show_spinner=False)
-def example_json() -> Dict[str, Any]:
-    return {
-        "business": {
-            "name": "My Business",
-            "revenue_goal": 1_000_000
-        },
-        "functions": CORE_FUNCTIONS,
-        "roles": [
-            {"Function": "Sales & Marketing", "Role": "Head of Sales", "Person": "Jordan Pike", "FTE": 1.0, "ReportsTo": "", "KPIs": "Revenue,Win Rate", "Accountabilities": "Own sales plan; forecast; pipeline reviews", "Notes": "Priority hire"},
-            {"Function": "Operations", "Role": "Production Lead", "Person": "Sam Lee", "FTE": 1.0, "ReportsTo": "", "KPIs": "OTIF,COGS%", "Accountabilities": "Schedule; QA; supplier mgmt", "Notes": ""},
-            {"Function": "Finance", "Role": "Bookkeeper", "Person": "Morgan Tan", "FTE": 0.6, "ReportsTo": "", "KPIs": "Debtor days,Cash runway", "Accountabilities": "AP/AR; payroll prep; BAS packs", "Notes": ""},
-            {"Function": "Sales & Marketing", "Role": "BDM", "Person": "Jordan Pike", "FTE": 1.0, "ReportsTo": "Head of Sales", "KPIs": "New logos,Meetings/week", "Accountabilities": "Prospecting; demos; proposals", "Notes": "Same person as Head of Sales for now"}
-        ],
-        "revenue_streams": DEFAULT_STREAMS
-    }
-
-# Simple, readable DOT label — escapes quotes and newlines
 def _esc(s: str) -> str:
-    return (s or "").replace("\n", "\\n").replace('"', '\"')
+    return (s or "").replace("\n", "\\n").replace('"', '\\"')
+
+def _list_profiles() -> list[str]:
+    names = []
+    for fn in os.listdir(PROFILES_DIR):
+        if fn.lower().endswith(".json"):
+            names.append(os.path.splitext(fn)[0])
+    names.sort()
+    return names
+
+def _slugify(name: str) -> str:
+    # Safe filename
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", name.strip())
+    return slug or "business"
+
+def _profile_path(name: str) -> str:
+    return os.path.join(PROFILES_DIR, f"{_slugify(name)}.json")
+
+def _logo_path_for(name: str, ext: str) -> str:
+    return os.path.join(LOGOS_DIR, f"{_slugify(name)}{ext.lower()}")
+
+def _save_logo_for(name: str, file) -> str | None:
+    if file is None:
+        return None
+    # Detect extension
+    fname = getattr(file, "name", "logo.png")
+    _, ext = os.path.splitext(fname.lower())
+    if ext not in [".png",".jpg",".jpeg",".svg"]:
+        ext = ".png"
+    dst = _logo_path_for(name, ext)
+    with open(dst, "wb") as f:
+        f.write(file.read())
+    return dst
+
+def _load_logo_for(name: str) -> str | None:
+    base = _slugify(name)
+    for ext in (".png",".jpg",".jpeg",".svg"):
+        p = os.path.join(LOGOS_DIR, base+ext)
+        if os.path.exists(p):
+            return p
+    return None
 
 def build_graphviz_dot(business_name: str, revenue_goal: float, df: pd.DataFrame) -> str:
-    """Create a Graphviz DOT for the accountability chart.
-    - Functions are clusters
-    - Roles are nodes. Node label shows Role and Person.
-    - Optional edges from ReportsTo -> Role (intra- or cross-function allowed)
-    """
-    business_label = f"{business_name}\n12‑month Goal: ${revenue_goal:,.0f}"
-
+    business_label = f"{business_name}\\n12‑month Goal: ${revenue_goal:,.0f}"
     roles = df["Role"].fillna("").astype(str).str.strip()
     people = df["Person"].fillna("").astype(str).str.strip()
     funcs  = df["Function"].fillna("").astype(str).str.strip()
@@ -129,7 +126,7 @@ def build_graphviz_dot(business_name: str, revenue_goal: float, df: pd.DataFrame
             if not role:
                 continue
             node_id = f"role_{abs(hash(role)) % (10**10)}"
-            label = role if not person else f"{role}\n({person})"
+            label = role if not person else f"{role}\\n({person})"
             dot.append(f'    {node_id} [label="{_esc(label)}"];')
             dot.append(f"    {func_node_id} -> {node_id};")
         dot.append("  }")
@@ -149,40 +146,138 @@ def build_graphviz_dot(business_name: str, revenue_goal: float, df: pd.DataFrame
     dot.append("}")
     return "\n".join(dot)
 
+# ---------- Cached defaults ----------
+@st.cache_data(show_spinner=False)
+def empty_roles_df() -> pd.DataFrame:
+    return pd.DataFrame(DEFAULT_ROWS, columns=ROLE_COLUMNS)
 
-# ---------- UI ----------
+@st.cache_data(show_spinner=False)
+def empty_streams_df() -> pd.DataFrame:
+    return pd.DataFrame(DEFAULT_STREAMS, columns=REVENUE_COLUMNS)
+
+@st.cache_data(show_spinner=False)
+def csv_template() -> str:
+    df = empty_roles_df()
+    return df.to_csv(index=False)
+
+# ---------- App State Boot ----------
 st.set_page_config(page_title="Success Dynamics – Accountability Chart", layout="wide", initial_sidebar_state="expanded")
 
-# Sidebar — Branding & Business
+if "functions" not in st.session_state: st.session_state.functions = CORE_FUNCTIONS.copy()
+if "roles_df" not in st.session_state: st.session_state.roles_df = empty_roles_df()
+if "revenue_streams_df" not in st.session_state: st.session_state.revenue_streams_df = empty_streams_df()
+if "business_name" not in st.session_state: st.session_state.business_name = "My Business"
+if "lock_goal" not in st.session_state: st.session_state.lock_goal = True
+if "revenue_goal" not in st.session_state: st.session_state.revenue_goal = float(st.session_state.revenue_streams_df["TargetValue"].sum())
+if "current_logo_path" not in st.session_state: st.session_state.current_logo_path = _load_logo_for(st.session_state.business_name)
+
+# ---------- Sidebar: Admin & Import/Export ----------
 with st.sidebar:
-    st.markdown("### Branding")
-    logo = st.file_uploader("Upload Success Dynamics logo (PNG/JPG/SVG)", type=["png", "jpg", "jpeg", "svg"])
-    if logo:
-        st.image(logo, use_container_width=True)
-    else:
-        st.markdown("**Success Dynamics**")
+    st.markdown("### Admin")
+    profiles = _list_profiles()
+    selected = st.selectbox("Open business profile", options=["(none)"] + profiles, index=0)
+    new_name = st.text_input("Business name", value=st.session_state.business_name)
+
+    cols = st.columns(3)
+    with cols[0]:
+        if st.button("Open"):
+            if selected != "(none)":
+                path = _profile_path(selected)
+                try:
+                    data = json.load(open(path, "r", encoding="utf-8"))
+                    st.session_state.business_name = data.get("business", {}).get("name", selected)
+                    st.session_state.functions = data.get("functions", CORE_FUNCTIONS).copy()
+                    st.session_state.roles_df = pd.DataFrame(data.get("roles", []), columns=ROLE_COLUMNS) if data.get("roles") else empty_roles_df()
+                    st.session_state.revenue_streams_df = pd.DataFrame(data.get("revenue_streams", DEFAULT_STREAMS), columns=REVENUE_COLUMNS)
+                    st.session_state.revenue_goal = float(data.get("business", {}).get("revenue_goal", st.session_state.revenue_streams_df["TargetValue"].sum()))
+                    st.session_state.lock_goal = bool(data.get("business", {}).get("lock_goal", True))
+                    st.session_state.current_logo_path = _load_logo_for(st.session_state.business_name)
+                    st.success(f"Loaded profile: {selected}")
+                except Exception as e:
+                    st.error(f"Failed to open: {e}")
+    with cols[1]:
+        if st.button("Save"):
+            # Overwrite under current name
+            st.session_state.business_name = new_name.strip() or "My Business"
+            export = {
+                "business": {
+                    "name": st.session_state.business_name,
+                    "revenue_goal": st.session_state.revenue_goal,
+                    "lock_goal": st.session_state.lock_goal,
+                },
+                "functions": st.session_state.functions,
+                "roles": st.session_state.roles_df.fillna("").to_dict(orient="records"),
+                "revenue_streams": st.session_state.revenue_streams_df.fillna("").to_dict(orient="records"),
+            }
+            try:
+                with open(_profile_path(st.session_state.business_name), "w", encoding="utf-8") as f:
+                    json.dump(export, f, indent=2)
+                st.success(f"Saved: {st.session_state.business_name}")
+            except Exception as e:
+                st.error(f"Save failed: {e}")
+    with cols[2]:
+        if st.button("Save As"):
+            # Save under typed name explicitly
+            name = new_name.strip() or "My Business"
+            export = {
+                "business": {
+                    "name": name,
+                    "revenue_goal": st.session_state.revenue_goal,
+                    "lock_goal": st.session_state.lock_goal,
+                },
+                "functions": st.session_state.functions,
+                "roles": st.session_state.roles_df.fillna("").to_dict(orient="records"),
+                "revenue_streams": st.session_state.revenue_streams_df.fillna("").to_dict(orient="records"),
+            }
+            try:
+                with open(_profile_path(name), "w", encoding="utf-8") as f:
+                    json.dump(export, f, indent=2)
+                st.session_state.business_name = name
+                st.success(f"Saved As: {name}")
+            except Exception as e:
+                st.error(f"Save As failed: {e}")
 
     st.markdown("---")
-    st.markdown("### Business Setup")
-    business_name = st.text_input("Business name", value="My Business")
+    st.markdown("### Branding")
+    logo_file = st.file_uploader("Upload Success Dynamics logo", type=["png","jpg","jpeg","svg"], key="logo_uploader")
+    if st.button("Attach Logo to Business"):
+        if logo_file is None:
+            st.warning("Choose a logo file first.")
+        else:
+            path = _save_logo_for(new_name.strip() or st.session_state.business_name, logo_file)
+            if path:
+                st.session_state.current_logo_path = path
+                st.success("Logo saved to profile.")
+            else:
+                st.error("Logo save failed.")
 
-    st.markdown("### Revenue Goal & Streams")
-    if "revenue_streams_df" not in st.session_state:
-        st.session_state.revenue_streams_df = empty_streams_df()
+    st.markdown("---")
+    st.markdown("### Import / Export")
+    uploaded_csv = st.file_uploader("Import Roles CSV", type=["csv"], key="csv")
+    uploaded_json = st.file_uploader("Import JSON (full app data)", type=["json"], key="json")
 
-    # Toggle: lock business revenue goal to sum of streams
-    lock_goal = st.checkbox("Lock revenue goal to sum of streams", value=True, help="When enabled, the goal equals the total of the revenue streams below.")
+    # Toggle goal behaviour
+    st.session_state.lock_goal = st.checkbox("Lock revenue goal to sum of streams", value=st.session_state.lock_goal)
 
-# Main — Revenue Streams then Roles
-st.title("Accountability Chart Builder")
+# ---------- Header (Top) with Logo ----------
+col_logo, col_title = st.columns([1,3], vertical_alignment="center")
+with col_logo:
+    if st.session_state.current_logo_path and os.path.exists(st.session_state.current_logo_path):
+        st.image(st.session_state.current_logo_path, use_container_width=True)
+    else:
+        st.write("")  # spacer
+with col_title:
+    st.title("Accountability Chart Builder")
+    st.caption("Success Dynamics — Profiles, Streams, Roles, Reporting Lines")
 
-# Revenue Streams Editor
+# ---------- Revenue Streams ----------
 st.subheader("Revenue Streams (12‑month)")
+if "revenue_streams_df" not in st.session_state:
+    st.session_state.revenue_streams_df = empty_streams_df()
+
 rev_df = st.session_state.revenue_streams_df
-# Ensure columns
 for c in REVENUE_COLUMNS:
-    if c not in rev_df.columns:
-        rev_df[c] = ""
+    if c not in rev_df.columns: rev_df[c] = ""
 
 rev_df["Stream"] = rev_df["Stream"].astype(str)
 rev_df["TargetValue"] = pd.to_numeric(rev_df["TargetValue"], errors="coerce").fillna(0.0).clip(0.0)
@@ -205,16 +300,21 @@ st.session_state.revenue_streams_df = rev_editor
 streams_total = float(rev_editor["TargetValue"].sum())
 st.metric("Total of Streams", f"${streams_total:,.0f}")
 
-# Revenue goal field: locked or free
-if lock_goal:
-    revenue_goal = streams_total
+# Revenue goal
+if st.session_state.lock_goal:
+    st.session_state.revenue_goal = streams_total
     st.caption("Revenue goal is locked to the sum of streams above.")
 else:
-    revenue_goal = st.number_input("12‑month revenue goal ($)", min_value=0.0, value=max(1_000_000.0, streams_total), step=50_000.0, format="%0.0f")
+    st.session_state.revenue_goal = st.number_input(
+        "12‑month revenue goal ($)",
+        min_value=0.0,
+        value=max(1_000_000.0, streams_total),
+        step=50_000.0, format="%0.0f"
+    )
 
 st.markdown("---")
 
-# Functions & Data Import/Export
+# ---------- Functions / Roles ----------
 col_left, col_right = st.columns([2,1])
 with col_left:
     st.subheader("Functions")
@@ -235,47 +335,41 @@ with col_left:
 
 with col_right:
     st.subheader("Import / Export")
-    uploaded_csv = st.file_uploader("Import Roles CSV", type=["csv"], key="csv")
-    uploaded_json = st.file_uploader("Import JSON (full app data)", type=["json"], key="json")
+    if uploaded_csv is not None:
+        try:
+            df_in = pd.read_csv(uploaded_csv)
+            missing = [c for c in ROLE_COLUMNS if c not in df_in.columns]
+            if missing:
+                st.error(f"CSV missing columns: {missing}")
+            else:
+                st.session_state.roles_df = df_in[ROLE_COLUMNS].copy()
+                st.success("CSV imported.")
+        except Exception as e:
+            st.error(f"CSV import failed: {e}")
 
-if "roles_df" not in st.session_state:
-    st.session_state.roles_df = empty_df()
-
-# Handle imports
-if uploaded_csv is not None:
-    try:
-        df_in = pd.read_csv(uploaded_csv)
-        missing = [c for c in ROLE_COLUMNS if c not in df_in.columns]
-        if missing:
-            st.error(f"CSV missing columns: {missing}")
-        else:
-            st.session_state.roles_df = df_in[ROLE_COLUMNS].copy()
-            st.success("CSV imported.")
-    except Exception as e:
-        st.error(f"CSV import failed: {e}")
-
-if uploaded_json is not None:
-    try:
-        data = json.load(uploaded_json)
-        st.session_state.functions = data.get("functions", CORE_FUNCTIONS).copy()
-        b = data.get("business", {})
-        if b:
-            business_name = b.get("name", business_name)
-        roles = data.get("roles", [])
-        revs = data.get("revenue_streams", DEFAULT_STREAMS)
-        st.session_state.revenue_streams_df = pd.DataFrame(revs, columns=REVENUE_COLUMNS)
-        df_in = pd.DataFrame(roles)
-        missing = [c for c in ROLE_COLUMNS if c not in df_in.columns]
-        if missing:
-            st.error(f"JSON roles missing columns: {missing}")
-        else:
-            st.session_state.roles_df = df_in[ROLE_COLUMNS].copy()
-            st.success("JSON imported.")
-    except Exception as e:
-        st.error(f"JSON import failed: {e}")
+    if uploaded_json is not None:
+        try:
+            data = json.load(uploaded_json)
+            st.session_state.functions = data.get("functions", CORE_FUNCTIONS).copy()
+            b = data.get("business", {})
+            if b:
+                st.session_state.business_name = b.get("name", st.session_state.business_name)
+                st.session_state.revenue_goal = float(b.get("revenue_goal", st.session_state.revenue_goal))
+                st.session_state.lock_goal = bool(b.get("lock_goal", st.session_state.lock_goal))
+            roles = data.get("roles", [])
+            revs = data.get("revenue_streams", DEFAULT_STREAMS)
+            st.session_state.revenue_streams_df = pd.DataFrame(revs, columns=REVENUE_COLUMNS)
+            df_in = pd.DataFrame(roles)
+            missing = [c for c in ROLE_COLUMNS if c not in df_in.columns]
+            if missing:
+                st.error(f"JSON roles missing columns: {missing}")
+            else:
+                st.session_state.roles_df = df_in[ROLE_COLUMNS].copy()
+                st.success("JSON imported.")
+        except Exception as e:
+            st.error(f"JSON import failed: {e}")
 
 st.subheader("Roles & Assignments")
-funcs_opts = st.session_state.functions
 df = st.session_state.roles_df
 
 for col in ROLE_COLUMNS:
@@ -293,7 +387,7 @@ edited = st.data_editor(
     num_rows="dynamic",
     use_container_width=True,
     column_config={
-        "Function": st.column_config.SelectboxColumn(options=funcs_opts, required=True),
+        "Function": st.column_config.SelectboxColumn(options=st.session_state.functions, required=True),
         "FTE": st.column_config.NumberColumn(min_value=0.0, max_value=1.0, step=0.1, format="%0.1f"),
         "KPIs": st.column_config.TextColumn(help="Comma‑separated list"),
         "Accountabilities": st.column_config.TextColumn(help="Bullets or lines"),
@@ -303,45 +397,36 @@ edited = st.data_editor(
 )
 st.session_state.roles_df = edited
 
-tip = "‘ReportsTo’ should reference another *Role* name (not a person). Leave blank to attach directly under the Function header."
-st.markdown(f":blue[Tip:] {tip}")
+st.markdown(":blue[Tip:] ‘ReportsTo’ should reference another *Role* name (not a person). Leave blank to attach directly under the Function header.")
 
-colA, colB, colC = st.columns(3)
+# Quick exports
+colA, colB = st.columns(2)
 with colA:
-    if st.button("Add Blank Role Row"):
-        st.session_state.roles_df.loc[len(st.session_state.roles_df)] = {c: "" for c in ROLE_COLUMNS}
-        st.session_state.roles_df.at[len(st.session_state.roles_df)-1, "FTE"] = 1.0
-with colB:
-    if st.button("Load Example Data"):
-        eg = example_json()
-        st.session_state.functions = eg["functions"].copy()
-        st.session_state.roles_df = pd.DataFrame(eg["roles"], columns=ROLE_COLUMNS)
-        st.session_state.revenue_streams_df = pd.DataFrame(eg["revenue_streams"], columns=REVENUE_COLUMNS)
-        st.success("Loaded example.")
-with colC:
     export_data = {
-        "business": {"name": business_name, "revenue_goal": revenue_goal},
+        "business": {
+            "name": st.session_state.business_name,
+            "revenue_goal": st.session_state.revenue_goal,
+            "lock_goal": st.session_state.lock_goal,
+        },
         "functions": st.session_state.functions,
         "roles": st.session_state.roles_df.fillna("").to_dict(orient="records"),
         "revenue_streams": st.session_state.revenue_streams_df.fillna("").to_dict(orient="records"),
     }
-    st.download_button("Export JSON", data=json.dumps(export_data, indent=2), file_name="accountability_chart.json", mime="application/json")
-
-csv_buf = StringIO()
-st.session_state.roles_df.to_csv(csv_buf, index=False)
-st.download_button("Export Roles CSV", data=csv_buf.getvalue(), file_name="accountability_chart_roles.csv", mime="text/csv")
-
-st.download_button("Download Roles CSV Template", data=csv_template(), file_name="accountability_chart_template.csv", mime="text/csv")
+    st.download_button("Export JSON (current)", data=json.dumps(export_data, indent=2), file_name="accountability_chart.json", mime="application/json")
+with colB:
+    csv_buf = StringIO()
+    st.session_state.roles_df.to_csv(csv_buf, index=False)
+    st.download_button("Export Roles CSV", data=csv_buf.getvalue(), file_name="accountability_chart_roles.csv", mime="text/csv")
 
 st.markdown("---")
 
-# Validation + Graph
+# ---------- Visualisation & Validation ----------
 st.subheader("Structure & Visualisation")
 roles_ser = st.session_state.roles_df["Role"].fillna("").astype(str).str.strip()
 if (roles_ser != "").sum() == 0:
     st.info("Add at least one Role to render the chart.")
 else:
-    dot = build_graphviz_dot(business_name, float(revenue_goal), st.session_state.roles_df)
+    dot = build_graphviz_dot(st.session_state.business_name, float(st.session_state.revenue_goal), st.session_state.roles_df)
     st.graphviz_chart(dot, use_container_width=True)
 
     dups = roles_ser[roles_ser != ""].duplicated(keep=False)
@@ -354,25 +439,4 @@ else:
     if bad_refs:
         st.warning("ReportsTo references missing: " + ", ".join(bad_refs) + ". Ensure each ‘ReportsTo’ matches an existing Role name.")
 
-st.markdown("---")
-
-with st.expander("How this aligns to the Accountability Chart process"):
-    st.markdown(
-        """
-        **Step 1 – List your current staff** → Use the *Person* column and optionally leave *Role* blank to start.
-
-        **Step 2 – Set your 12‑month revenue goal** → Drive this from **Revenue Streams** (lock toggle) or set a free goal.
-
-        **Step 3 – Define the roles needed** → Add rows under the appropriate *Function* and fill in *Role*. Avoid shaping roles to current staff.
-
-        **Step 4 – Confirm your major functions** → Start with Sales & Marketing, Operations, Finance. Add others as needed.
-
-        **Step 5 – Add roles to each function** → In the table.
-
-        **Step 6 – Add people** → Fill the *Person* column. One person per role row. A person may appear in multiple roles as needed.
-
-        Then use *ReportsTo* to map reporting lines, and visualise the result above.
-        """
-    )
-
-st.caption("© 2025 • Success Dynamics Accountability Chart • Streamlit app")
+st.caption("© 2025 • Success Dynamics Accountability Chart • Streamlit app — v2")

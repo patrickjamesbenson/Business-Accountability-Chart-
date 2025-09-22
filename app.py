@@ -1,19 +1,10 @@
-# app.py — Success Dynamics Accountability Chart (Streamlit) — v2
+# app.py — Success Dynamics Accountability Chart (Streamlit) — v3
 # ----------------------------------------------------------------
-# New in v2:
-# - Branding logo shows at the top header (not just in the sidebar)
-# - Business Profiles: save/load by business name (on-disk JSON under ./data/profiles)
-#   • Choose existing profile from a selector, or create a new profile
-#   • Save overwrites the JSON, Save As creates a new profile
-#   • Per-business logo persistence: saved under ./data/logos/<business_name>.<ext>
-#
-# Quickstart:
-#   pip install -r requirements.txt
-#   streamlit run app.py
-#
-# Notes:
-# - Streamlit Cloud/file-system persistence: files in ./data persist only for the runtime container.
-#   For long-term persistence across cloud restarts, wire this to external storage (S3, GDrive, DB).
+# New in v3:
+# - Delete Profile (also deletes linked logo files)
+# - Attach / Change Logo per profile (overwrite supported)
+# - Auto-rerun on Open/Save/Save As/Attach Logo/Delete Profile to refresh header + state
+# - Data folders include .gitkeep so GitHub drag-drop keeps folder structure
 #
 from __future__ import annotations
 
@@ -34,6 +25,12 @@ PROFILES_DIR = os.path.join(APP_ROOT, "data", "profiles")
 LOGOS_DIR    = os.path.join(APP_ROOT, "data", "logos")
 os.makedirs(PROFILES_DIR, exist_ok=True)
 os.makedirs(LOGOS_DIR, exist_ok=True)
+
+# Ensure .gitkeep exists for GitHub web uploads
+for d in (PROFILES_DIR, LOGOS_DIR):
+    keep = os.path.join(d, ".gitkeep")
+    if not os.path.exists(keep):
+        open(keep,"w").close()
 
 DEFAULT_ROWS = [
     {"Function": f, "Role": "", "Person": "", "FTE": 1.0, "ReportsTo": "", "KPIs": "", "Accountabilities": "", "Notes": ""}
@@ -65,8 +62,14 @@ def _slugify(name: str) -> str:
 def _profile_path(name: str) -> str:
     return os.path.join(PROFILES_DIR, f"{_slugify(name)}.json")
 
-def _logo_path_for(name: str, ext: str) -> str:
-    return os.path.join(LOGOS_DIR, f"{_slugify(name)}{ext.lower()}")
+def _logo_paths_for(name: str) -> list[str]:
+    base = _slugify(name)
+    out = []
+    for ext in (".png",".jpg",".jpeg",".svg"):
+        p = os.path.join(LOGOS_DIR, base+ext)
+        if os.path.exists(p):
+            out.append(p)
+    return out
 
 def _save_logo_for(name: str, file) -> str | None:
     if file is None:
@@ -76,18 +79,29 @@ def _save_logo_for(name: str, file) -> str | None:
     _, ext = os.path.splitext(fname.lower())
     if ext not in [".png",".jpg",".jpeg",".svg"]:
         ext = ".png"
-    dst = _logo_path_for(name, ext)
+    # Remove any existing logo variants for this profile (so we don't keep multiple)
+    for existing in _logo_paths_for(name):
+        try: os.remove(existing)
+        except: pass
+    dst = os.path.join(LOGOS_DIR, f"{_slugify(name)}{ext.lower()}")
     with open(dst, "wb") as f:
         f.write(file.read())
     return dst
 
 def _load_logo_for(name: str) -> str | None:
-    base = _slugify(name)
-    for ext in (".png",".jpg",".jpeg",".svg"):
-        p = os.path.join(LOGOS_DIR, base+ext)
-        if os.path.exists(p):
-            return p
-    return None
+    paths = _logo_paths_for(name)
+    return paths[0] if paths else None
+
+def _delete_profile_and_logo(name: str) -> None:
+    # Delete JSON
+    try:
+        os.remove(_profile_path(name))
+    except FileNotFoundError:
+        pass
+    # Delete logo(s)
+    for p in _logo_paths_for(name):
+        try: os.remove(p)
+        except: pass
 
 def build_graphviz_dot(business_name: str, revenue_goal: float, df: pd.DataFrame) -> str:
     business_label = f"{business_name}\\n12‑month Goal: ${revenue_goal:,.0f}"
@@ -171,15 +185,15 @@ if "lock_goal" not in st.session_state: st.session_state.lock_goal = True
 if "revenue_goal" not in st.session_state: st.session_state.revenue_goal = float(st.session_state.revenue_streams_df["TargetValue"].sum())
 if "current_logo_path" not in st.session_state: st.session_state.current_logo_path = _load_logo_for(st.session_state.business_name)
 
-# ---------- Sidebar: Admin & Import/Export ----------
+# ---------- Sidebar: Admin ----------
 with st.sidebar:
     st.markdown("### Admin")
     profiles = _list_profiles()
     selected = st.selectbox("Open business profile", options=["(none)"] + profiles, index=0)
     new_name = st.text_input("Business name", value=st.session_state.business_name)
 
-    cols = st.columns(3)
-    with cols[0]:
+    c_open, c_save, c_saveas = st.columns(3)
+    with c_open:
         if st.button("Open"):
             if selected != "(none)":
                 path = _profile_path(selected)
@@ -193,11 +207,11 @@ with st.sidebar:
                     st.session_state.lock_goal = bool(data.get("business", {}).get("lock_goal", True))
                     st.session_state.current_logo_path = _load_logo_for(st.session_state.business_name)
                     st.success(f"Loaded profile: {selected}")
+                    st.rerun()
                 except Exception as e:
                     st.error(f"Failed to open: {e}")
-    with cols[1]:
+    with c_save:
         if st.button("Save"):
-            # Overwrite under current name
             st.session_state.business_name = new_name.strip() or "My Business"
             export = {
                 "business": {
@@ -213,11 +227,11 @@ with st.sidebar:
                 with open(_profile_path(st.session_state.business_name), "w", encoding="utf-8") as f:
                     json.dump(export, f, indent=2)
                 st.success(f"Saved: {st.session_state.business_name}")
+                st.rerun()
             except Exception as e:
                 st.error(f"Save failed: {e}")
-    with cols[2]:
+    with c_saveas:
         if st.button("Save As"):
-            # Save under typed name explicitly
             name = new_name.strip() or "My Business"
             export = {
                 "business": {
@@ -234,23 +248,53 @@ with st.sidebar:
                     json.dump(export, f, indent=2)
                 st.session_state.business_name = name
                 st.success(f"Saved As: {name}")
+                st.rerun()
             except Exception as e:
                 st.error(f"Save As failed: {e}")
 
+    # Delete with confirmation
+    st.markdown("---")
+    st.markdown("### Danger Zone")
+    confirm = st.checkbox("I understand this will permanently delete the selected profile and its logo(s).")
+    if st.button("Delete Profile") and confirm:
+        if selected == "(none)":
+            st.warning("Select a profile to delete.")
+        else:
+            try:
+                _delete_profile_and_logo(selected)
+                st.success(f"Deleted profile: {selected}")
+                # If deleting the current profile, reset to defaults
+                if _slugify(selected) == _slugify(st.session_state.business_name):
+                    st.session_state.business_name = "My Business"
+                    st.session_state.functions = CORE_FUNCTIONS.copy()
+                    st.session_state.roles_df = empty_roles_df()
+                    st.session_state.revenue_streams_df = empty_streams_df()
+                    st.session_state.revenue_goal = float(st.session_state.revenue_streams_df["TargetValue"].sum())
+                    st.session_state.lock_goal = True
+                    st.session_state.current_logo_path = None
+                st.rerun()
+            except Exception as e:
+                st.error(f"Delete failed: {e}")
+
+    # Branding
     st.markdown("---")
     st.markdown("### Branding")
-    logo_file = st.file_uploader("Upload Success Dynamics logo", type=["png","jpg","jpeg","svg"], key="logo_uploader")
+    logo_file = st.file_uploader("Upload/Change logo", type=["png","jpg","jpeg","svg"], key="logo_uploader")
     if st.button("Attach Logo to Business"):
+        target_name = new_name.strip() or st.session_state.business_name
         if logo_file is None:
             st.warning("Choose a logo file first.")
         else:
-            path = _save_logo_for(new_name.strip() or st.session_state.business_name, logo_file)
+            path = _save_logo_for(target_name, logo_file)
             if path:
+                st.session_state.business_name = target_name
                 st.session_state.current_logo_path = path
                 st.success("Logo saved to profile.")
+                st.rerun()
             else:
                 st.error("Logo save failed.")
 
+    # Import/Export
     st.markdown("---")
     st.markdown("### Import / Export")
     uploaded_csv = st.file_uploader("Import Roles CSV", type=["csv"], key="csv")
@@ -272,9 +316,6 @@ with col_title:
 
 # ---------- Revenue Streams ----------
 st.subheader("Revenue Streams (12‑month)")
-if "revenue_streams_df" not in st.session_state:
-    st.session_state.revenue_streams_df = empty_streams_df()
-
 rev_df = st.session_state.revenue_streams_df
 for c in REVENUE_COLUMNS:
     if c not in rev_df.columns: rev_df[c] = ""
@@ -300,7 +341,6 @@ st.session_state.revenue_streams_df = rev_editor
 streams_total = float(rev_editor["TargetValue"].sum())
 st.metric("Total of Streams", f"${streams_total:,.0f}")
 
-# Revenue goal
 if st.session_state.lock_goal:
     st.session_state.revenue_goal = streams_total
     st.caption("Revenue goal is locked to the sum of streams above.")
@@ -318,9 +358,6 @@ st.markdown("---")
 col_left, col_right = st.columns([2,1])
 with col_left:
     st.subheader("Functions")
-    if "functions" not in st.session_state:
-        st.session_state.functions = CORE_FUNCTIONS.copy()
-
     custom_func = st.text_input("Add a function")
     add_f, reset_f = st.columns(2)
     with add_f:
@@ -414,7 +451,8 @@ with colA:
     }
     st.download_button("Export JSON (current)", data=json.dumps(export_data, indent=2), file_name="accountability_chart.json", mime="application/json")
 with colB:
-    csv_buf = StringIO()
+    from io import StringIO as _SIO
+    csv_buf = _SIO()
     st.session_state.roles_df.to_csv(csv_buf, index=False)
     st.download_button("Export Roles CSV", data=csv_buf.getvalue(), file_name="accountability_chart_roles.csv", mime="text/csv")
 
@@ -439,4 +477,4 @@ else:
     if bad_refs:
         st.warning("ReportsTo references missing: " + ", ".join(bad_refs) + ". Ensure each ‘ReportsTo’ matches an existing Role name.")
 
-st.caption("© 2025 • Success Dynamics Accountability Chart • Streamlit app — v2")
+st.caption("© 2025 • Success Dynamics Accountability Chart • Streamlit app — v3")

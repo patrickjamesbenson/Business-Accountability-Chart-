@@ -1,17 +1,16 @@
-# Success Dynamics Accountability Coach — v7.2
+# Tracking Success — v7.4
 
-**New**
-- Bottom **PUSH SYNC (stub)** panel with **Destinations** multiselect:
-  **UPCOACH, CALENDARLY, EMAIL, OTHER**, plus a notes/payload preview and a **Simulate Push** button.
+**New in this build**
+- **Coaching Notes — Uploads & Links**: attach screenshots (PNG/JPG) and URLs **per month**, each with **Include in report** toggles.
+- **Tasks module**: quick-create tasks with common templates, assign to people (from your Organisation/People Costs), due date, notes, and an **Include in report** toggle.
+- **One‑click completion**: each task has a **Completion link** (`?complete_task=TOKEN`). Share that link with the assignee; opening the app with it marks the task **Done** automatically.
+- **Reports**: Tracking PDF now includes **Coaching evidence** (only items you marked *Include in report*) and **Tasks** (included only).
 
-**Includes previous fixes & features (v7.1 + v7)**:
-- Duplicate widget ID fix (unique keys everywhere)
-- People Comments & ExtraMonthly (auto-suggest vans/vehicles)
-- Account Start Date (rolling 12 months), Horizon goals (1/3/6/12), windowed dashboard
-- Accountability, Next Session, Reports (PDF), S3 persistence, expanders
-
-## Run
+**Run**
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
+
+**Deploy**
+Upload all files (keep the `data/` folder) to your GitHub repo. On Streamlit Cloud, set the entry point to `app.py`.
